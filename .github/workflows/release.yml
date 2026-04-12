@@ -32,7 +32,7 @@ jobs:
         run: chmod +x ./mvnw
 
       - name: Validate SNAPSHOT version
-        if: github.event_name == 'push' || inputs.snapshot == true
+        if: inputs.snapshot == true
         run: |
           VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
           if [[ "$VERSION" != *-SNAPSHOT ]]; then
