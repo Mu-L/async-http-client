@@ -30,6 +30,7 @@ import org.asynchttpclient.Request;
 import org.asynchttpclient.cookie.CookieStore;
 import org.asynchttpclient.netty.NettyResponseFuture;
 import org.asynchttpclient.netty.channel.ChannelManager;
+import org.asynchttpclient.netty.request.NettyRequest;
 import org.asynchttpclient.netty.request.NettyRequestSender;
 import org.asynchttpclient.proxy.ProxyServer;
 import org.asynchttpclient.scram.ScramContext;
@@ -133,13 +134,16 @@ public class Interceptors {
             return connectSuccessInterceptor.exitAfterHandlingConnect(channel, future, request, proxyServer);
         }
 
-        // Process Authentication-Info / Proxy-Authentication-Info headers (RFC 7616 Section 3.5)
-        if (realm != null && realm.getScheme() == Realm.AuthScheme.DIGEST) {
-            processAuthenticationInfo(future, responseHeaders, realm, false);
+        // Process Authentication-Info / Proxy-Authentication-Info headers (RFC 7616 Section 3.5).
+        // A present-but-invalid rspauth aborts the exchange (mutual-auth failure), so honour the boolean.
+        if (realm != null && realm.getScheme() == Realm.AuthScheme.DIGEST
+                && processAuthenticationInfo(channel, future, responseHeaders, realm, false)) {
+            return true;
         }
         Realm proxyRealm = future.getProxyRealm();
-        if (proxyRealm != null && proxyRealm.getScheme() == Realm.AuthScheme.DIGEST) {
-            processAuthenticationInfo(future, responseHeaders, proxyRealm, true);
+        if (proxyRealm != null && proxyRealm.getScheme() == Realm.AuthScheme.DIGEST
+                && processAuthenticationInfo(channel, future, responseHeaders, proxyRealm, true)) {
+            return true;
         }
 
         // Process SCRAM Authentication-Info (RFC 7804 §5)
@@ -155,12 +159,18 @@ public class Interceptors {
         return false;
     }
 
-    private void processAuthenticationInfo(NettyResponseFuture<?> future, HttpHeaders responseHeaders,
-                                           Realm currentRealm, boolean proxy) {
+    /**
+     * @return true if the exchange failed server verification and the request has been aborted, in which
+     * case the caller must stop delivering the response as a success.
+     */
+    private boolean processAuthenticationInfo(Channel channel, NettyResponseFuture<?> future, HttpHeaders responseHeaders,
+                                              Realm currentRealm, boolean proxy) {
         String headerName = proxy ? "Proxy-Authentication-Info" : "Authentication-Info";
         String authInfoHeader = responseHeaders.get(headerName);
         if (authInfoHeader == null) {
-            return;
+            // RFC 7616 §3.5: the header is optional and may travel in chunked trailers (not read here), so an
+            // absent header is warn-worthy at most, not a failure — matching the SCRAM decision.
+            return false;
         }
 
         String nextnonce = Realm.Builder.matchParam(authInfoHeader, "nextnonce");
@@ -182,13 +192,43 @@ public class Interceptors {
             LOGGER.debug("Rotated to nextnonce from {} header", headerName);
         }
 
+        // rspauth is computed over the request the client just sent, so verify it against currentRealm (the
+        // realm used for this exchange), not the rotated nextnonce realm above. The cnonce must be the one
+        // actually sent — the realm on the future is rebuilt for header emission and regenerates its cnonce,
+        // so read the sent cnonce back off the request's own Authorization header.
         String rspauth = Realm.Builder.matchParam(authInfoHeader, "rspauth");
         if (rspauth != null) {
-            String expectedRspauth = AuthenticatorUtils.computeRspAuth(currentRealm);
+            String sentCnonce = sentDigestCnonce(future, proxy);
+            String expectedRspauth = sentCnonce != null
+                    ? AuthenticatorUtils.computeRspAuth(currentRealm, sentCnonce)
+                    : AuthenticatorUtils.computeRspAuth(currentRealm);
             if (!rspauth.equalsIgnoreCase(expectedRspauth)) {
-                LOGGER.warn("Server rspauth mismatch: expected={}, got={}", expectedRspauth, rspauth);
+                // RFC 7616 §3.5: a present-but-invalid rspauth means the server failed to prove knowledge of
+                // the shared secret, so the client must not treat the response as an authenticated success.
+                // Mirror the SCRAM ServerSignature handling (#2235): abort the request.
+                LOGGER.warn("Server rspauth mismatch in {} (expected={}, got={}) — aborting request "
+                        + "(RFC 7616 §3.5: server failed mutual authentication)", headerName, expectedRspauth, rspauth);
+                requestSender.abort(channel, future, new IOException("Digest rspauth verification failed"));
+                return true;
             }
+            LOGGER.debug("Digest rspauth verified successfully from {} header", headerName);
         }
+        return false;
+    }
+
+    /**
+     * The cnonce that was actually sent on the request whose response we are processing, read back from that
+     * request's own {@code Authorization} (or {@code Proxy-Authorization}) header. This is the value the
+     * server signed the rspauth over — {@code future.getRealm().getCnonce()} is not, because that realm was
+     * rebuilt for header emission and regenerated its cnonce.
+     */
+    private static String sentDigestCnonce(NettyResponseFuture<?> future, boolean proxy) {
+        NettyRequest nettyRequest = future.getNettyRequest();
+        if (nettyRequest == null) {
+            return null;
+        }
+        String sentAuthHeader = nettyRequest.getHttpRequest().headers().get(proxy ? "Proxy-Authorization" : "Authorization");
+        return sentAuthHeader != null ? Realm.Builder.matchParam(sentAuthHeader, "cnonce") : null;
     }
 
     /**

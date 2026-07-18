@@ -163,12 +163,26 @@ public final class AuthenticatorUtils {
      * Note: HA2' for rspauth uses empty method prefix.
      */
     public static String computeRspAuth(Realm realm) {
+        return computeRspAuth(realm, realm.getCnonce());
+    }
+
+    /**
+     * RFC 7616 Section 3.5: compute rspauth using an explicitly supplied {@code cnonce}.
+     * <p>
+     * The realm carried on the response future is rebuilt for header emission (see
+     * {@link #perRequestAuthorizationHeader}) and each {@link Realm.Builder#build()} regenerates the cnonce,
+     * so {@code realm.getCnonce()} is not the value that was actually put on the wire and that the server
+     * signed over. Callers verifying a server rspauth must therefore pass the cnonce parsed from the
+     * request's own {@code Authorization}/{@code Proxy-Authorization} header. Everything else (nonce, nc, uri)
+     * is copied verbatim onto the future's realm and is stable.
+     */
+    public static String computeRspAuth(Realm realm, @Nullable String cnonce) {
         String algorithm = realm.getAlgorithm() != null ? realm.getAlgorithm() : "MD5";
         String hashAlgorithm = algorithm.replace("-sess", "");
         Charset wireCs = realm.getCharset() != null ? realm.getCharset() : ISO_8859_1;
 
-        // Calculate HA1 (same as request)
-        String ha1 = calculateHA1(realm, algorithm);
+        // Calculate HA1 (same as request); for the "-sess" variants HA1 folds in the cnonce too.
+        String ha1 = calculateHA1(realm, algorithm, cnonce);
 
         // Calculate HA2' = H(":" + uri) — no method prefix
         Uri uri = realm.getUri();
@@ -188,7 +202,7 @@ public final class AuthenticatorUtils {
         String responseInput;
         if (qop != null) {
             responseInput = ha1 + ":" + realm.getNonce() + ":" + realm.getNc() + ":"
-                    + realm.getCnonce() + ":" + qop + ":" + ha2;
+                    + cnonce + ":" + qop + ":" + ha2;
         } else {
             responseInput = ha1 + ":" + realm.getNonce() + ":" + ha2;
         }
@@ -210,6 +224,10 @@ public final class AuthenticatorUtils {
      * @return The computed HA1 hex string
      */
     private static String calculateHA1(Realm realm, String algorithm) {
+        return calculateHA1(realm, algorithm, realm.getCnonce());
+    }
+
+    private static String calculateHA1(Realm realm, String algorithm, @Nullable String cnonce) {
         Charset wireCs = realm.getCharset() != null ? realm.getCharset() : StandardCharsets.ISO_8859_1;
         String a1Base = realm.getPrincipal() + ':' + realm.getRealmName() + ':' + realm.getPassword();
         String hashAlgorithm = algorithm.replace("-sess", "");
@@ -222,7 +240,7 @@ public final class AuthenticatorUtils {
 
             if (algorithm.endsWith("-sess")) {
                 // For -sess: HA1 = H(H(username:realm:password):nonce:cnonce)
-                String sessInput = ha1 + ":" + realm.getNonce() + ":" + realm.getCnonce();
+                String sessInput = ha1 + ":" + realm.getNonce() + ":" + cnonce;
                 md.reset();
                 md.update(sessInput.getBytes(StandardCharsets.ISO_8859_1));
                 ha1 = MessageDigestUtils.bytesToHex(md.digest());
