@@ -322,8 +322,11 @@ public final class NettyRequestFactory {
         if (!connect) {
             addAuthorizationHeader(headers, perRequestAuthorizationHeader(request, realm));
         }
-        // only set proxy auth on request over plain HTTP, or when performing CONNECT
-        if (!uri.isSecured() || connect) {
+        // Only set proxy auth on a request sent to an HTTP(S) proxy: either over plain HTTP (the origin
+        // request carries an absolute URI straight to the proxy) or on a CONNECT (sent to the proxy to open
+        // the tunnel). A SOCKS proxy tunnels at the transport layer, so the request reaches the ORIGIN — a
+        // Proxy-Authorization header would leak the proxy credentials to the origin. Guard on the proxy type.
+        if ((!uri.isSecured() || connect) && proxyServer != null && proxyServer.getProxyType().isHttp()) {
             setProxyAuthorizationHeader(headers, perRequestProxyAuthorizationHeader(request, proxyRealm));
         }
 
