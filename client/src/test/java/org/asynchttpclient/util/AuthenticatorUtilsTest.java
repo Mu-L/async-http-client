@@ -23,6 +23,7 @@ import org.asynchttpclient.RequestBuilder;
 import org.asynchttpclient.request.body.generator.ByteArrayBodyGenerator;
 import org.asynchttpclient.request.body.generator.FileBodyGenerator;
 import org.asynchttpclient.request.body.generator.InputStreamBodyGenerator;
+import org.asynchttpclient.uri.Uri;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -526,6 +527,39 @@ public class AuthenticatorUtilsTest {
         String rspauth = AuthenticatorUtils.computeRspAuth(realm);
         assertNotNull(rspauth);
         assertEquals(32, rspauth.length()); // MD5 hex is 32 chars
+    }
+
+    @Test
+    void computeRealmURIAbsoluteFormOmitsUserInfo() {
+        Uri uri = Uri.create("http://user:secret@example.com/path?q=1");
+
+        // RFC 7616 Section 3.4: uri is the Effective Request URI, which carries no userinfo.
+        assertEquals("http://example.com/path?q=1", AuthenticatorUtils.computeRealmURI(uri, true, false));
+        assertEquals("http://example.com/path", AuthenticatorUtils.computeRealmURI(uri, true, true));
+        // origin-form was never affected, but pin it so neither branch regresses
+        assertEquals("/path?q=1", AuthenticatorUtils.computeRealmURI(uri, false, false));
+    }
+
+    @Test
+    void digestUriParamOmitsUserInfo() {
+        Request request = new RequestBuilder("GET")
+                .setUrl("http://user:secret@example.com/path?q=1")
+                .build();
+        Realm realm = new Realm.Builder("user", "secret")
+                .setScheme(Realm.AuthScheme.DIGEST)
+                .setRealmName("testrealm")
+                .setNonce("testnonce")
+                .setQop("auth")
+                .setUseAbsoluteURI(true)
+                .setUsePreemptiveAuth(true)
+                .build();
+
+        String header = AuthenticatorUtils.perRequestAuthorizationHeader(request, realm);
+
+        assertNotNull(header);
+        assertTrue(header.contains("uri=\"http://example.com/path?q=1\""),
+                "Digest uri param must be the Effective Request URI: " + header);
+        assertFalse(header.contains("secret@"), "password leaked into the Digest uri param: " + header);
     }
 
     @Test

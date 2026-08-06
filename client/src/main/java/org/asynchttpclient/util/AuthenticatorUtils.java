@@ -89,9 +89,19 @@ public final class AuthenticatorUtils {
         return realm != null ? realm.getBasicAuthHeader() : null;
     }
 
+    /**
+     * The value of the Digest {@code uri} auth-param (RFC 7616 Section 3.4). It is the Effective Request
+     * URI (RFC 7230 Section 5.5), which never carries the deprecated userinfo subcomponent, so render the
+     * absolute form without it: the credentials would otherwise be spelled out in cleartext in the
+     * {@code Authorization} header on the very hop Digest exists to keep them off, and the value would
+     * disagree with the absolute-form request line that RFC 7616 Section 3.4.6 has servers verify it
+     * against.
+     */
     public static String computeRealmURI(Uri uri, boolean useAbsoluteURI, boolean omitQuery) {
         if (useAbsoluteURI) {
-            return omitQuery && isNonEmpty(uri.getQuery()) ? uri.withNewQuery(null).toUrl() : uri.toUrl();
+            return omitQuery && isNonEmpty(uri.getQuery())
+                    ? uri.withNewQuery(null).toUrlWithoutUserInfo()
+                    : uri.toUrlWithoutUserInfo();
         } else {
             String path = uri.getNonEmptyPath();
             return omitQuery || !isNonEmpty(uri.getQuery()) ? path : path + '?' + uri.getQuery();
