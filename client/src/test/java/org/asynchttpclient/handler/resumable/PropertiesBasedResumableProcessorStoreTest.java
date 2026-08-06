@@ -24,8 +24,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -67,6 +69,26 @@ public class PropertiesBasedResumableProcessorStoreTest {
             processor.save(null);
 
             assertEquals("untouched", new String(Files.readAllBytes(target), StandardCharsets.UTF_8));
+        } finally {
+            Files.deleteIfExists(target);
+            deleteStore();
+        }
+    }
+
+    @Test
+    public void loadDoesNotReadThroughASymlink() throws IOException {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        deleteStore();
+        Files.createDirectories(STORE.getParent());
+
+        Path target = Files.createTempFile("ahc-symlink-source", ".txt");
+        try {
+            Files.write(target, "http://localhost/planted.url=42\n".getBytes(StandardCharsets.UTF_8));
+            Files.createSymbolicLink(STORE, target);
+
+            Map<String, Long> loaded = new PropertiesBasedResumableProcessor().load();
+
+            assertTrue(loaded.isEmpty(), "state must not be read back through a planted symlink, got " + loaded);
         } finally {
             Files.deleteIfExists(target);
             deleteStore();
