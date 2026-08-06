@@ -19,6 +19,7 @@ import io.github.artsok.RepeatedIfExceptionsTest;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletResponseWrapper;
 import org.asynchttpclient.test.ExtendedDigestAuthenticator;
 import org.eclipse.jetty.server.Request;
 import org.eclipse.jetty.server.Server;
@@ -81,16 +82,61 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
         }
     }
 
+    /**
+     * An honest server that answers the authenticated request with a same-origin redirect. The realm the
+     * future carries still holds the pre-redirect URI — {@code Redirect30xInterceptor} only clears the realm
+     * when it strips credentials, which a same-origin redirect does not — so an expected rspauth derived from
+     * that realm is computed over the wrong {@code uri} and cannot match what the server signed. Verification
+     * has to use the parameters actually sent.
+     */
+    @RepeatedIfExceptionsTest(repeats = 5)
+    public void validRspAuthIsAcceptedAcrossSameOriginRedirect() throws Exception {
+        restartServer(new RedirectingRspAuthHandler());
+
+        try (AsyncHttpClient client = asyncHttpClient()) {
+            Future<Response> f = client.prepareGet("http://localhost:" + port1 + "/start")
+                    .setFollowRedirect(true)
+                    .setRealm(digestAuthRealm(USER, ADMIN).setRealmName("MyRealm").build())
+                    .execute();
+            Response resp = f.get(60, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertEquals(HttpServletResponse.SC_OK, resp.getStatusCode());
+            // The rspauth that was verified belongs to the request sent to the redirect target, not to the
+            // URI the exchange started on.
+            assertTrue(resp.getHeader("X-Auth").contains("uri=\"/final\""),
+                    "expected the final request to carry uri=\"/final\" but got: " + resp.getHeader("X-Auth"));
+        }
+    }
+
+    /**
+     * Preemptive Digest: the credentials go out on the first request, so the realm the future carries has no
+     * {@code uri} at all and an expected rspauth derived from it hashes {@code H(":")}. An honest server must
+     * not be rejected for that.
+     */
+    @RepeatedIfExceptionsTest(repeats = 5)
+    public void preemptiveDigestIsNotSpuriouslyRejected() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient()) {
+            Future<Response> f = client.prepareGet("http://localhost:" + port1 + '/')
+                    .setRealm(digestAuthRealm(USER, ADMIN)
+                            .setRealmName("MyRealm")
+                            .setNonce(ExtendedDigestAuthenticator.newNonce())
+                            .setQop("auth")
+                            .setUsePreemptiveAuth(true)
+                            .build())
+                    .execute();
+            Response resp = f.get(60, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertEquals(HttpServletResponse.SC_OK, resp.getStatusCode());
+            // No 401 round trip happened: the very first request carried the credentials.
+            assertNotNull(resp.getHeader("X-Auth"));
+        }
+    }
+
     @RepeatedIfExceptionsTest(repeats = 5)
     public void invalidRspAuthIsRejected() throws Exception {
         // Server completes the digest handshake but returns an rspauth it could not have computed without the
         // shared secret. RFC 7616 §3.5 requires the client to consider the exchange unsuccessful.
-        server.stop();
-        server = new Server();
-        ServerConnector connector = addHttpConnector(server);
-        server.setHandler(new RspAuthHandler(true));
-        server.start();
-        port1 = connector.getLocalPort();
+        restartServer(new RspAuthHandler(true));
 
         try (AsyncHttpClient client = asyncHttpClient()) {
             Future<Response> f = client.prepareGet("http://localhost:" + port1 + '/')
@@ -100,6 +146,56 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
             assertNotNull(ex.getCause());
             assertTrue(ex.getCause().getMessage() != null && ex.getCause().getMessage().contains("rspauth"),
                     "expected an rspauth verification failure but got: " + ex.getCause());
+        }
+    }
+
+    private void restartServer(AbstractHandler handler) throws Exception {
+        server.stop();
+        server = new Server();
+        ServerConnector connector = addHttpConnector(server);
+        server.setHandler(handler);
+        server.start();
+        port1 = connector.getLocalPort();
+    }
+
+    /**
+     * Authenticates every request the same way {@link RspAuthHandler} does, but answers {@code /start} with
+     * a same-origin redirect to {@code /final} so the client authenticates twice against two different URIs.
+     */
+    private static class RedirectingRspAuthHandler extends AbstractHandler {
+        private final RspAuthHandler delegate = new RspAuthHandler(false);
+
+        @Override
+        public void handle(String target, Request r, HttpServletRequest request, HttpServletResponse response)
+                throws IOException, ServletException {
+            if ("/start".equals(target)) {
+                // Redirect only once the request is authenticated, so both hops carry credentials.
+                String authz = request.getHeader("Authorization");
+                if (authz != null && authz.startsWith("Digest ")) {
+                    response.setHeader("Location", "/final");
+                    delegate.handle(target, r, request, new StatusOverridingResponse(response, HttpServletResponse.SC_FOUND));
+                    return;
+                }
+            }
+            delegate.handle(target, r, request, response);
+        }
+    }
+
+    /**
+     * Lets {@link RspAuthHandler} write its {@code Authentication-Info} while the wrapper decides the status
+     * line, so the redirect hop is otherwise byte-for-byte the response an honest server sends.
+     */
+    private static class StatusOverridingResponse extends HttpServletResponseWrapper {
+        private final int status;
+
+        StatusOverridingResponse(HttpServletResponse response, int status) {
+            super(response);
+            this.status = status;
+        }
+
+        @Override
+        public void setStatus(int ignored) {
+            super.setStatus(status);
         }
     }
 

@@ -39,6 +39,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -527,6 +528,74 @@ public class AuthenticatorUtilsTest {
         String rspauth = AuthenticatorUtils.computeRspAuth(realm);
         assertNotNull(rspauth);
         assertEquals(32, rspauth.length()); // MD5 hex is 32 chars
+    }
+
+    @Test
+    void computeExpectedRspAuthUsesTheParametersOnTheWire() {
+        // A realm whose uri/nonce/nc/cnonce are all stale or unset — exactly the state the response future
+        // carries after a redirect or on a preemptive first request.
+        Realm realm = new Realm.Builder("user", "pass")
+                .setScheme(Realm.AuthScheme.DIGEST)
+                .setRealmName("testrealm")
+                .setNonce("stale-nonce")
+                .setAlgorithm("MD5")
+                .setQop("auth")
+                .setUri(Uri.create("http://example.com/before-the-redirect"))
+                .build();
+
+        String sent = "Digest username=\"user\", realm=\"testrealm\", nonce=\"live-nonce\", uri=\"/after\", "
+                + "algorithm=MD5, response=\"ignored\", qop=auth, nc=00000002, cnonce=\"deadbeefdeadbeef\"";
+
+        String expected = AuthenticatorUtils.computeExpectedRspAuth(realm, sent);
+
+        assertNotNull(expected);
+        // Independently: rspauth = H(HA1 : nonce : nc : cnonce : qop : H(":" uri)), all from the wire.
+        assertEquals(referenceRspAuth("user", "testrealm", "pass", "live-nonce", "00000002",
+                "deadbeefdeadbeef", "auth", "/after"), expected);
+        // ...and nothing like what the stale realm would have produced.
+        assertNotEquals(AuthenticatorUtils.computeRspAuth(realm), expected);
+    }
+
+    @Test
+    void computeExpectedRspAuthReturnsNullWhenTheSentCredentialsCannotBeRecovered() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .setScheme(Realm.AuthScheme.DIGEST)
+                .setRealmName("testrealm")
+                .setNonce("nonce")
+                .setQop("auth")
+                .build();
+
+        // Not Digest at all — e.g. the exchange authenticated with something else.
+        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm, "Basic dXNlcjpwYXNz"));
+        // Digest, but missing the parameters rspauth is computed over.
+        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm, "Digest username=\"user\", uri=\"/\""));
+        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm, "Digest username=\"user\", nonce=\"n\""));
+        // qop was negotiated, so nc and cnonce are part of the signed input and must both be present.
+        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm,
+                "Digest nonce=\"n\", uri=\"/\", qop=auth, nc=00000001"));
+        // An algorithm we cannot hash with must not blow up the response path.
+        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm,
+                "Digest nonce=\"n\", uri=\"/\", algorithm=SHA-1, response=\"x\""));
+        // ...including a spelling the digest pool rejects rather than reports. The value is echoed from the
+        // server's own challenge, so it must not be able to throw out of the response path.
+        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm,
+                "Digest nonce=\"n\", uri=\"/\", algorithm=MD5-SESS, qop=auth, nc=00000001, cnonce=\"c\""));
+    }
+
+    private static String referenceRspAuth(String username, String realmName, String password, String nonce,
+                                           String nc, String cnonce, String qop, String uri) throws RuntimeException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            String ha1 = MessageDigestUtils.bytesToHex(md.digest(
+                    (username + ':' + realmName + ':' + password).getBytes(StandardCharsets.ISO_8859_1)));
+            md.reset();
+            String ha2 = MessageDigestUtils.bytesToHex(md.digest((':' + uri).getBytes(StandardCharsets.ISO_8859_1)));
+            md.reset();
+            String kd = ha1 + ':' + nonce + ':' + nc + ':' + cnonce + ':' + qop + ':' + ha2;
+            return MessageDigestUtils.bytesToHex(md.digest(kd.getBytes(StandardCharsets.ISO_8859_1)));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test

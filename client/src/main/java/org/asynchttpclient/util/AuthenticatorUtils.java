@@ -25,6 +25,8 @@ import org.asynchttpclient.spnego.SpnegoEngine;
 import org.asynchttpclient.spnego.SpnegoEngineException;
 import org.asynchttpclient.uri.Uri;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -41,6 +43,8 @@ import static org.asynchttpclient.Dsl.realm;
 import static org.asynchttpclient.util.MiscUtils.isNonEmpty;
 
 public final class AuthenticatorUtils {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(AuthenticatorUtils.class);
 
     public static final String NEGOTIATE = "Negotiate";
     private static final int MAX_AUTH_INT_BODY_SIZE = 10 * 1024 * 1024;
@@ -173,30 +177,86 @@ public final class AuthenticatorUtils {
      * Note: HA2' for rspauth uses empty method prefix.
      */
     public static String computeRspAuth(Realm realm) {
-        return computeRspAuth(realm, realm.getCnonce());
+        Uri uri = realm.getUri();
+        String requestUri = uri != null ? computeRealmURI(uri, realm.isUseAbsoluteURI(), realm.isOmitQuery()) : "";
+        return computeRspAuth(realm, realm.getAlgorithm(), realm.getRealmName(), realm.getNonce(),
+                realm.getNc(), realm.getCnonce(), realm.getQop(), requestUri);
     }
 
     /**
-     * RFC 7616 Section 3.5: compute rspauth using an explicitly supplied {@code cnonce}.
+     * RFC 7616 Section 3.5: the rspauth an honest server must have sent, computed over the Digest
+     * credentials this client actually put on the wire.
      * <p>
-     * The realm carried on the response future is rebuilt for header emission (see
-     * {@link #perRequestAuthorizationHeader}) and each {@link Realm.Builder#build()} regenerates the cnonce,
-     * so {@code realm.getCnonce()} is not the value that was actually put on the wire and that the server
-     * signed over. Callers verifying a server rspauth must therefore pass the cnonce parsed from the
-     * request's own {@code Authorization}/{@code Proxy-Authorization} header. Everything else (nonce, nc, uri)
-     * is copied verbatim onto the future's realm and is stable.
+     * The rspauth signs the parameters of the request it answers, and none of them can be read back off the
+     * {@link Realm}. The realm on the response future is rebuilt for header emission (see
+     * {@link #perRequestAuthorizationHeader}), and every {@link Realm.Builder#build()} regenerates the
+     * cnonce; its {@code uri} is whatever the exchange started with, which a redirect or a preemptive first
+     * request leaves stale or unset. So parse the credentials header instead and use the realm only for the
+     * secret and the charset.
+     *
+     * @param sentCredentials the {@code Authorization} or {@code Proxy-Authorization} header value sent with
+     *                        the request being answered
+     * @return the expected rspauth, or {@code null} when it cannot be derived — no Digest credentials were
+     * sent (a CONNECT is answered before any are), the header is missing parameters, or the algorithm is
+     * unsupported. Callers must then skip verification rather than enforce a value known to be wrong.
      */
-    public static String computeRspAuth(Realm realm, @Nullable String cnonce) {
-        String algorithm = realm.getAlgorithm() != null ? realm.getAlgorithm() : "MD5";
-        String hashAlgorithm = algorithm.replace("-sess", "");
+    public static @Nullable String computeExpectedRspAuth(Realm realm, String sentCredentials) {
+        if (!sentCredentials.regionMatches(true, 0, "Digest", 0, 6)) {
+            return null;
+        }
+
+        String nonce = Realm.Builder.matchParam(sentCredentials, "nonce");
+        String requestUri = Realm.Builder.matchParam(sentCredentials, "uri");
+        if (nonce == null || requestUri == null) {
+            return null;
+        }
+
+        String qop = Realm.Builder.matchParam(sentCredentials, "qop");
+        String nc = Realm.Builder.matchParam(sentCredentials, "nc");
+        String cnonce = Realm.Builder.matchParam(sentCredentials, "cnonce");
+        if (qop != null && (nc == null || cnonce == null)) {
+            return null;
+        }
+
+        String algorithm = Realm.Builder.matchParam(sentCredentials, "algorithm");
+        if (algorithm == null) {
+            algorithm = realm.getAlgorithm();
+        }
+        if (algorithm != null && !SUPPORTED_ALGORITHMS.contains(algorithm.toUpperCase())) {
+            return null;
+        }
+
+        // The realm auth-param is the realm-value the server challenged with and hashed HA1 over. The
+        // username is deliberately not taken from the header: under RFC 7616 Section 3.4.4 userhash it is a
+        // hash, while HA1 is always over the plaintext principal.
+        String realmName = Realm.Builder.matchParam(sentCredentials, "realm");
+        if (realmName == null) {
+            realmName = realm.getRealmName();
+        }
+
+        try {
+            return computeRspAuth(realm, algorithm, realmName, nonce, nc, cnonce, qop, requestUri);
+        } catch (RuntimeException e) {
+            // The algorithm here is echoed from the server's own challenge, and a spelling the digest pool
+            // does not recognise (say "MD5-SESS") throws out of it. This runs on the response path, where an
+            // escaping exception would fail the exchange — the very outcome not being able to verify must
+            // not produce. Report "cannot verify" instead and let the caller skip enforcement.
+            LOGGER.debug("Can't compute the expected rspauth from the credentials sent: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static String computeRspAuth(Realm realm, @Nullable String algorithm, @Nullable String realmName,
+                                         @Nullable String nonce, @Nullable String nc, @Nullable String cnonce,
+                                         @Nullable String qop, String requestUri) {
+        String algo = algorithm != null ? algorithm : "MD5";
+        String hashAlgorithm = algo.replace("-sess", "");
         Charset wireCs = realm.getCharset() != null ? realm.getCharset() : ISO_8859_1;
 
         // Calculate HA1 (same as request); for the "-sess" variants HA1 folds in the cnonce too.
-        String ha1 = calculateHA1(realm, algorithm, cnonce);
+        String ha1 = calculateHA1(realm, algo, realmName, nonce, cnonce);
 
         // Calculate HA2' = H(":" + uri) — no method prefix
-        Uri uri = realm.getUri();
-        String requestUri = uri != null ? computeRealmURI(uri, realm.isUseAbsoluteURI(), realm.isOmitQuery()) : "";
         String a2 = ":" + requestUri;
         MessageDigest md = MessageDigestUtils.pooledMessageDigest(hashAlgorithm);
         String ha2;
@@ -208,13 +268,11 @@ public final class AuthenticatorUtils {
         }
 
         // rspauth = H(HA1:nonce:nc:cnonce:qop:HA2')
-        String qop = realm.getQop();
         String responseInput;
         if (qop != null) {
-            responseInput = ha1 + ":" + realm.getNonce() + ":" + realm.getNc() + ":"
-                    + cnonce + ":" + qop + ":" + ha2;
+            responseInput = ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2;
         } else {
-            responseInput = ha1 + ":" + realm.getNonce() + ":" + ha2;
+            responseInput = ha1 + ":" + nonce + ":" + ha2;
         }
         md = MessageDigestUtils.pooledMessageDigest(hashAlgorithm);
         try {
@@ -229,17 +287,18 @@ public final class AuthenticatorUtils {
      * Calculates the HA1 value for HTTP Digest Authentication.
      * This method handles both regular and session-based HA1 calculations.
      *
-     * @param realm     The authentication realm containing credentials and challenge info
+     * @param realm     The authentication realm carrying the principal and password
      * @param algorithm The digest algorithm (e.g., "MD5", "MD5-sess")
+     * @param realmName The realm-value hashed into A1 — taken from the credentials on the wire rather than
+     *                  from {@code realm}, which a rebuilt realm may no longer agree with
+     * @param nonce     The nonce hashed into the "-sess" variants of HA1
+     * @param cnonce    The cnonce hashed into the "-sess" variants of HA1
      * @return The computed HA1 hex string
      */
-    private static String calculateHA1(Realm realm, String algorithm) {
-        return calculateHA1(realm, algorithm, realm.getCnonce());
-    }
-
-    private static String calculateHA1(Realm realm, String algorithm, @Nullable String cnonce) {
+    private static String calculateHA1(Realm realm, String algorithm, @Nullable String realmName,
+                                       @Nullable String nonce, @Nullable String cnonce) {
         Charset wireCs = realm.getCharset() != null ? realm.getCharset() : StandardCharsets.ISO_8859_1;
-        String a1Base = realm.getPrincipal() + ':' + realm.getRealmName() + ':' + realm.getPassword();
+        String a1Base = realm.getPrincipal() + ':' + realmName + ':' + realm.getPassword();
         String hashAlgorithm = algorithm.replace("-sess", "");
 
         MessageDigest md = MessageDigestUtils.pooledMessageDigest(hashAlgorithm);
@@ -250,7 +309,7 @@ public final class AuthenticatorUtils {
 
             if (algorithm.endsWith("-sess")) {
                 // For -sess: HA1 = H(H(username:realm:password):nonce:cnonce)
-                String sessInput = ha1 + ":" + realm.getNonce() + ":" + cnonce;
+                String sessInput = ha1 + ":" + nonce + ":" + cnonce;
                 md.reset();
                 md.update(sessInput.getBytes(StandardCharsets.ISO_8859_1));
                 ha1 = MessageDigestUtils.bytesToHex(md.digest());

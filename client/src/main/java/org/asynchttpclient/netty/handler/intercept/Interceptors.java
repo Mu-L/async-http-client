@@ -45,6 +45,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
+import static io.netty.handler.codec.http.HttpHeaderNames.AUTHORIZATION;
+import static io.netty.handler.codec.http.HttpHeaderNames.PROXY_AUTHORIZATION;
 import static io.netty.handler.codec.http.HttpHeaderNames.SET_COOKIE;
 import static org.asynchttpclient.Dsl.realm;
 import static org.asynchttpclient.util.HttpConstants.ResponseStatusCodes.CONTINUE_100;
@@ -192,16 +194,26 @@ public class Interceptors {
             LOGGER.debug("Rotated to nextnonce from {} header", headerName);
         }
 
-        // rspauth is computed over the request the client just sent, so verify it against currentRealm (the
-        // realm used for this exchange), not the rotated nextnonce realm above. The cnonce must be the one
-        // actually sent — the realm on the future is rebuilt for header emission and regenerates its cnonce,
-        // so read the sent cnonce back off the request's own Authorization header.
+        // rspauth signs the request the client just sent, so it must be verified against the parameters
+        // that were actually on the wire — uri, nonce, nc, cnonce, qop and realm — not against the realm
+        // the future is carrying. That realm is rebuilt for header emission (regenerating its cnonce), its
+        // uri is the one the exchange started with rather than the one a redirect moved to, and on a
+        // preemptive first request it has no uri at all. Recover them from the request's own
+        // Authorization header and use currentRealm only for the shared secret and charset.
         String rspauth = Realm.Builder.matchParam(authInfoHeader, "rspauth");
         if (rspauth != null) {
-            String sentCnonce = sentDigestCnonce(future, proxy);
-            String expectedRspauth = sentCnonce != null
-                    ? AuthenticatorUtils.computeRspAuth(currentRealm, sentCnonce)
-                    : AuthenticatorUtils.computeRspAuth(currentRealm);
+            String sentCredentials = sentDigestCredentials(future, proxy);
+            String expectedRspauth = sentCredentials != null
+                    ? AuthenticatorUtils.computeExpectedRspAuth(currentRealm, sentCredentials)
+                    : null;
+            if (expectedRspauth == null) {
+                // Nothing to compare against: no Digest credentials were sent (a CONNECT is answered before
+                // any are), or the ones that were cannot be parsed back. Enforcing a value known to be
+                // wrong would fail honest servers, which is worse than not enforcing here.
+                LOGGER.warn("Can't verify the rspauth in {}: the Digest credentials sent with this request "
+                        + "could not be recovered, so mutual authentication is not enforced for it", headerName);
+                return false;
+            }
             if (!rspauth.equalsIgnoreCase(expectedRspauth)) {
                 // RFC 7616 §3.5: a present-but-invalid rspauth means the server failed to prove knowledge of
                 // the shared secret, so the client must not treat the response as an authenticated success.
@@ -217,18 +229,20 @@ public class Interceptors {
     }
 
     /**
-     * The cnonce that was actually sent on the request whose response we are processing, read back from that
-     * request's own {@code Authorization} (or {@code Proxy-Authorization}) header. This is the value the
-     * server signed the rspauth over — {@code future.getRealm().getCnonce()} is not, because that realm was
-     * rebuilt for header emission and regenerated its cnonce.
+     * The Digest credentials actually sent on the request whose response we are processing, read back from
+     * that request's own {@code Authorization} (or {@code Proxy-Authorization}) header. These are the
+     * parameters the server signed the rspauth over; the realm on the future is not, because it is rebuilt
+     * for header emission and only ever holds the state of the exchange that seeded it.
+     *
+     * @return the header value, or {@code null} when the request carried no credentials — a CONNECT sent to
+     * open a tunnel is one, since the origin credentials are deliberately withheld from the proxy
      */
-    private static String sentDigestCnonce(NettyResponseFuture<?> future, boolean proxy) {
+    private static String sentDigestCredentials(NettyResponseFuture<?> future, boolean proxy) {
         NettyRequest nettyRequest = future.getNettyRequest();
         if (nettyRequest == null) {
             return null;
         }
-        String sentAuthHeader = nettyRequest.getHttpRequest().headers().get(proxy ? "Proxy-Authorization" : "Authorization");
-        return sentAuthHeader != null ? Realm.Builder.matchParam(sentAuthHeader, "cnonce") : null;
+        return nettyRequest.getHttpRequest().headers().get(proxy ? PROXY_AUTHORIZATION : AUTHORIZATION);
     }
 
     /**
