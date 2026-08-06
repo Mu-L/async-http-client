@@ -157,6 +157,17 @@ public interface AsyncHttpClientConfig {
     boolean isEnableAutomaticDecompression();
 
     /**
+     * @return the maximum number of bytes a single HTTP/1.1 response body may decompress to before the
+     *         exchange is failed. Guards against decompression-bomb responses — a tiny compressed body that
+     *         inflates to gigabytes and can OOM the client (the limit is enforced transparently when
+     *         automatic decompression is enabled). {@code 0} disables the limit. Defaults to 256 MiB.
+     *         HTTP/2 has its own ceiling, see {@link #getHttp2MaxDecompressedResponseSize()}.
+     */
+    default long getMaxDecompressedResponseSize() {
+        return 256L * 1024 * 1024;
+    }
+
+    /**
      * Return the {@link ThreadFactory} an {@link AsyncHttpClient} use for handling asynchronous response.
      *
      * @return the {@link ThreadFactory} an {@link AsyncHttpClient} use for handling asynchronous response. If no {@link ThreadFactory} has been explicitly

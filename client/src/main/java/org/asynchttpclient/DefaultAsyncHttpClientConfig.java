@@ -78,6 +78,7 @@ import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultKe
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultKeepEncodingHeader;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultMaxConnections;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultMaxConnectionsPerHost;
+import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultMaxDecompressedResponseSize;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultMaxRedirects;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultMaxRequestRetry;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultPooledConnectionIdleTimeout;
@@ -131,6 +132,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
     private final boolean compressionEnforced;
 
     private final boolean enableAutomaticDecompression;
+    private final long maxDecompressedResponseSize;
     private final String userAgent;
     private final @Nullable Realm realm;
     private final int maxRequestRetry;
@@ -235,6 +237,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
                                          boolean strict302Handling,
                                          boolean compressionEnforced,
                                          boolean enableAutomaticDecompression,
+                                         long maxDecompressedResponseSize,
                                          String userAgent,
                                          @Nullable Realm realm,
                                          int maxRequestRetry,
@@ -339,6 +342,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
         this.strict302Handling = strict302Handling;
         this.compressionEnforced = compressionEnforced;
         this.enableAutomaticDecompression = enableAutomaticDecompression;
+        this.maxDecompressedResponseSize = maxDecompressedResponseSize;
         this.userAgent = userAgent;
         this.realm = realm;
         this.maxRequestRetry = maxRequestRetry;
@@ -482,6 +486,11 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
     @Override
     public boolean isEnableAutomaticDecompression() {
         return enableAutomaticDecompression;
+    }
+
+    @Override
+    public long getMaxDecompressedResponseSize() {
+        return maxDecompressedResponseSize;
     }
 
     @Override
@@ -922,6 +931,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
         private boolean strict302Handling = defaultStrict302Handling();
         private boolean compressionEnforced = defaultCompressionEnforced();
         private boolean enableAutomaticDecompression = defaultEnableAutomaticDecompression();
+        private long maxDecompressedResponseSize = defaultMaxDecompressedResponseSize();
         private String userAgent = defaultUserAgent();
         private @Nullable Realm realm;
         private int maxRequestRetry = defaultMaxRequestRetry();
@@ -1029,6 +1039,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
             strict302Handling = config.isStrict302Handling();
             compressionEnforced = config.isCompressionEnforced();
             enableAutomaticDecompression = config.isEnableAutomaticDecompression();
+            maxDecompressedResponseSize = config.getMaxDecompressedResponseSize();
             userAgent = config.getUserAgent();
             realm = config.getRealm();
             maxRequestRetry = config.getMaxRequestRetry();
@@ -1168,6 +1179,19 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
          */
         public Builder setEnableAutomaticDecompression(boolean enable) {
             enableAutomaticDecompression = enable;
+            return this;
+        }
+
+        /**
+         * Bound the cumulative size an HTTP/1.1 response body may decompress to, so a small, highly
+         * compressible body cannot inflate without limit and OOM the client. {@code 0} disables the bound.
+         * HTTP/2 is bounded separately, see {@link #setHttp2MaxDecompressedResponseSize(long)}.
+         *
+         * @param maxDecompressedResponseSize the ceiling in bytes, 0 to disable
+         * @return this
+         */
+        public Builder setMaxDecompressedResponseSize(long maxDecompressedResponseSize) {
+            this.maxDecompressedResponseSize = maxDecompressedResponseSize;
             return this;
         }
 
@@ -1721,6 +1745,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
                     strict302Handling,
                     compressionEnforced,
                     enableAutomaticDecompression,
+                    maxDecompressedResponseSize,
                     userAgent,
                     realm,
                     maxRequestRetry,

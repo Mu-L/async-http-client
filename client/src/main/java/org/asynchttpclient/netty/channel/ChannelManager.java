@@ -32,7 +32,6 @@ import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.http.HttpClientCodec;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.websocketx.WebSocket08FrameDecoder;
 import io.netty.handler.codec.http.websocketx.WebSocket08FrameEncoder;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
@@ -77,6 +76,7 @@ import org.asynchttpclient.channel.NoopChannelPool;
 import org.asynchttpclient.netty.NettyResponseFuture;
 import org.asynchttpclient.netty.OnLastHttpContentCallback;
 import org.asynchttpclient.netty.handler.AsyncHttpClientHandler;
+import org.asynchttpclient.netty.handler.Http1ContentDecompressor;
 import org.asynchttpclient.netty.handler.Http2Handler;
 import org.asynchttpclient.netty.handler.Http2PingHandler;
 import org.asynchttpclient.netty.handler.HttpHandler;
@@ -436,37 +436,15 @@ public class ChannelManager {
         });
     }
 
-    private HttpContentDecompressor newHttpContentDecompressor() {
-        // Bound the HTTP/1.1 decompressor's cumulative allocation to guard against decompression bombs
-        // (a small compressed body that inflates without limit). The no-arg constructor uses
-        // maxAllocation=0, i.e. unbounded. Reuse the same ceiling the HTTP/2 path already enforces via
-        // Http2ContentDecompressor so both protocols honour one configured limit; Netty throws a
-        // DecompressionException once the inflated size would exceed it.
-        int maxAllocation = maxDecompressedResponseSize();
-        if (config.isKeepEncodingHeader()) {
-            return new HttpContentDecompressor(maxAllocation) {
-                @Override
-                protected String getTargetContentEncoding(String contentEncoding) {
-                    return contentEncoding;
-                }
-            };
-        } else {
-            return new HttpContentDecompressor(maxAllocation);
-        }
-    }
-
     /**
-     * The configured decompressed-response ceiling, as the {@code int} maxAllocation Netty's HTTP/1.1
-     * {@link HttpContentDecompressor} expects. The knob ({@link AsyncHttpClientConfig#getHttp2MaxDecompressedResponseSize()},
-     * 256 MiB by default) is a {@code long}, so clamp it into {@code int} range; {@code 0} keeps Netty's
-     * "unbounded" semantics for callers that deliberately disable the limit.
+     * The HTTP/1.1 decompressor, bounded so a decompression bomb — a small, highly compressible body that
+     * inflates without limit — fails the exchange instead of exhausting the heap. The ceiling comes from
+     * {@link AsyncHttpClientConfig#getMaxDecompressedResponseSize()} (256 MiB by default, {@code 0} to
+     * disable); see {@link Http1ContentDecompressor} for why Netty's own {@code maxAllocation} argument
+     * does not provide this.
      */
-    private int maxDecompressedResponseSize() {
-        long configured = config.getHttp2MaxDecompressedResponseSize();
-        if (configured <= 0) {
-            return 0;
-        }
-        return (int) Math.min(configured, Integer.MAX_VALUE);
+    private Http1ContentDecompressor newHttpContentDecompressor() {
+        return new Http1ContentDecompressor(config.isKeepEncodingHeader(), config.getMaxDecompressedResponseSize());
     }
 
     public final void tryToOfferChannelToPool(Channel channel, AsyncHandler<?> asyncHandler, boolean keepAlive, Object partitionKey) {
