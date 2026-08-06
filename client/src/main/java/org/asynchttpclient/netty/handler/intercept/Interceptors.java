@@ -116,6 +116,21 @@ public class Interceptors {
             return true;
         }
 
+        // A CONNECT is addressed to the proxy, on a socket that is still plaintext until the proxy accepts
+        // it. Only the two interceptors that speak to the proxy may answer it: the origin-request ones
+        // rebuild the exchange as the origin request on a reused channel, which on a rejected CONNECT means
+        // sending the origin request — and its credentials — to the proxy in the clear.
+        if (httpRequest.method() == HttpMethod.CONNECT) {
+            if (statusCode == OK_200) {
+                return connectSuccessInterceptor.exitAfterHandlingConnect(channel, future, request, proxyServer);
+            }
+            if (statusCode == PROXY_AUTHENTICATION_REQUIRED_407) {
+                return proxyUnauthorized407Interceptor.exitAfterHandling407(channel, future, response, request, proxyServer, httpRequest);
+            }
+            LOGGER.debug("Proxy answered CONNECT with {}: no tunnel, delivering the response as-is", statusCode);
+            return false;
+        }
+
         if (statusCode == UNAUTHORIZED_401) {
             return unauthorized401Interceptor.exitAfterHandling401(channel, future, response, request, realm, httpRequest);
         }
@@ -130,10 +145,6 @@ public class Interceptors {
 
         if (Redirect30xInterceptor.isRedirect(statusCode)) {
             return redirect30xInterceptor.exitAfterHandlingRedirect(channel, future, response, request, statusCode, realm);
-        }
-
-        if (httpRequest.method() == HttpMethod.CONNECT && statusCode == OK_200) {
-            return connectSuccessInterceptor.exitAfterHandlingConnect(channel, future, request, proxyServer);
         }
 
         // Process Authentication-Info / Proxy-Authentication-Info headers (RFC 7616 Section 3.5).

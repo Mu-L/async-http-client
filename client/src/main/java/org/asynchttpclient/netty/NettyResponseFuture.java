@@ -134,6 +134,10 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
     private boolean headersAlreadyWrittenOnContinue;
     private boolean dontWriteBodyBecauseExpectContinue;
     private boolean allowConnect;
+    // Set only by ConnectSuccessInterceptor, on a proxy CONNECT the proxy actually accepted. A rejected
+    // CONNECT leaves the socket plaintext and pointed at the proxy, which is indistinguishable from an
+    // established tunnel by looking at the request method alone.
+    private boolean tunnelEstablished;
     private Realm realm;
     private Realm proxyRealm;
     // LoadBalance.ROUND_ROBIN overrides; all null in DEFAULT mode
@@ -277,6 +281,7 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
         cancelTimeouts();
         channel = null;
         reuseChannel = false;
+        tunnelEstablished = false;
         boolean alreadyTerminated = IS_DONE_FIELD.getAndSet(this, 1) != 0 || isCancelled != 0;
         if (!alreadyTerminated) {
             releaseRequestIfNotHandedToChannel();
@@ -506,6 +511,19 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
 
     public void setConnectAllowed(boolean allowConnect) {
         this.allowConnect = allowConnect;
+    }
+
+    /**
+     * Whether a proxy CONNECT on the currently attached channel succeeded, so the socket now carries a
+     * tunnel to the origin rather than a plaintext hop to the proxy. Only
+     * {@code ConnectSuccessInterceptor} sets this.
+     */
+    public boolean isTunnelEstablished() {
+        return tunnelEstablished;
+    }
+
+    public void setTunnelEstablished(boolean tunnelEstablished) {
+        this.tunnelEstablished = tunnelEstablished;
     }
 
     public void attachChannel(Channel channel, boolean reuseChannel) {

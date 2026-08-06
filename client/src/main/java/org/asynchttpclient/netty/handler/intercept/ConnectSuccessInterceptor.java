@@ -67,6 +67,9 @@ public class ConnectSuccessInterceptor {
         
         future.setReuseChannel(true);
         future.setConnectAllowed(false);
+        // The tunnel is up: from here the channel reaches the origin, so the next request on it may carry
+        // the origin's credentials. Nothing else may set this — see NettyRequestSender#isConnectAlreadyDone.
+        future.setTunnelEstablished(true);
 
         Request targetRequest = future.getTargetRequest().toBuilder().build();
         if (whenHandshaked == null) {

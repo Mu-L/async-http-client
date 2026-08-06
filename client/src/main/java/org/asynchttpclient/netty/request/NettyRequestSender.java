@@ -275,10 +275,21 @@ public final class NettyRequestSender {
         }
     }
 
+    /**
+     * Whether the channel this future is holding already carries a tunnel to the origin, so the request
+     * about to be sent can go straight down it instead of opening one.
+     * <p>
+     * The method of the last request is not enough to decide that: it is CONNECT whether the proxy accepted
+     * the tunnel or rejected it with a 401, a 407 or a redirect, and a rejected CONNECT leaves a plaintext
+     * hop to the proxy. Treating that as a tunnel put the origin request — Authorization header and all —
+     * on the wire to the proxy in the clear. Require the flag ConnectSuccessInterceptor sets on an accepted
+     * CONNECT.
+     */
     private static boolean isConnectAlreadyDone(Request request, NettyResponseFuture<?> future) {
         return future != null
                 // If the channel can't be reused or closed, a CONNECT is still required
                 && future.isReuseChannel() && Channels.isChannelActive(future.channel())
+                && future.isTunnelEstablished()
                 && future.getNettyRequest() != null
                 && future.getNettyRequest().getHttpRequest().method() == HttpMethod.CONNECT
                 && !request.getMethod().equals(CONNECT);

@@ -80,6 +80,16 @@ public class ProxyUnauthorized407Interceptor {
             return false;
         }
 
+        // A SOCKS proxy tunnels at the transport layer and never speaks HTTP, so a 407 on such a connection
+        // was written by the ORIGIN. Answering it puts the proxy credentials — including an NTLM Type-3
+        // message computed over a challenge the origin chose — on a request that reaches the origin. The
+        // header is set directly on the Request here and newNettyRequest copies request headers verbatim,
+        // downstream of the proxy-type gate that guards the generated header.
+        if (proxyServer == null || !proxyServer.getProxyType().isHttp()) {
+            LOGGER.debug("Can't handle 407: not an HTTP proxy, so the 407 came from the origin");
+            return false;
+        }
+
         List<String> proxyAuthHeaders = response.headers().getAll(PROXY_AUTHENTICATE);
 
         if (proxyAuthHeaders.isEmpty()) {
