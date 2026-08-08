@@ -149,6 +149,35 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
         }
     }
 
+    /**
+     * RFC 7616 §3.5 defines {@code A2} for {@code qop=auth-int} as {@code ":" request-uri ":" H(entity-body)}
+     * over the <em>response</em> entity-body. That body has not been received when the {@code
+     * Authentication-Info} header is processed, so the expected value simply cannot be derived there. The
+     * client must therefore fall back to warn-and-deliver for auth-int instead of enforcing the auth-only
+     * formula, which would abort against a perfectly conformant server.
+     * <p>
+     * The server arm here computes rspauth <em>from the RFC</em> rather than by mirroring the client, which is
+     * what makes this test able to catch the mismatch at all.
+     */
+    @RepeatedIfExceptionsTest(repeats = 5)
+    public void authIntRspAuthIsNotEnforcedAgainstAConformantServer() throws Exception {
+        restartServer(new AuthIntRspAuthHandler());
+
+        try (AsyncHttpClient client = asyncHttpClient()) {
+            Future<Response> f = client.prepareGet("http://localhost:" + port1 + '/')
+                    .setRealm(digestAuthRealm(USER, ADMIN).setRealmName("MyRealm").build())
+                    .execute();
+            Response resp = f.get(60, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertEquals(HttpServletResponse.SC_OK, resp.getStatusCode());
+            assertEquals(AuthIntRspAuthHandler.BODY, resp.getResponseBody());
+            // The exchange really did negotiate auth-int; the client did not quietly fall back to auth.
+            assertNotNull(resp.getHeader("X-Auth"));
+            assertTrue(resp.getHeader("X-Auth").contains("qop=auth-int"),
+                    "expected the request to have been sent with qop=auth-int but got: " + resp.getHeader("X-Auth"));
+        }
+    }
+
     private void restartServer(AbstractHandler handler) throws Exception {
         server.stop();
         server = new Server();
@@ -196,6 +225,80 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
         @Override
         public void setStatus(int ignored) {
             super.setStatus(status);
+        }
+    }
+
+    /**
+     * An honest {@code qop="auth-int"} server. It offers auth-int alone, validates the request digest with
+     * {@code A2 = Method ":" request-uri ":" H(request-body)}, and signs its answer with
+     * {@code A2 = ":" request-uri ":" H(response-body)} — both straight out of RFC 7616 §3.4.2/§3.5, not
+     * copied from the client's implementation. Everything it emits is byte-for-byte what a conformant server
+     * sends, so a client that aborts here is rejecting a correct peer.
+     */
+    private static class AuthIntRspAuthHandler extends AbstractHandler {
+        static final String BODY = "auth-int body that the rspauth is computed over";
+
+        private final String realm = "MyRealm";
+        private final String nonce = ExtendedDigestAuthenticator.newNonce();
+
+        @Override
+        public void handle(String target, Request r, HttpServletRequest request, HttpServletResponse response)
+                throws IOException, ServletException {
+            String authz = request.getHeader("Authorization");
+            if (authz == null || !authz.startsWith("Digest ")) {
+                challenge(response);
+                return;
+            }
+
+            Map<String, String> p = ExtendedDigestAuthenticator.parseCredentials(authz.substring("Digest ".length()));
+            try {
+                // A GET carries no body, so H(entity-body) over the request is H("").
+                String requestBodyHash = md5Hex(new byte[0]);
+                String a2 = request.getMethod() + ':' + p.get("uri") + ':' + requestBodyHash;
+                if (!"auth-int".equals(p.get("qop"))
+                        || !USER.equals(p.get("username"))
+                        || !kd(p, md5Hex(a2.getBytes(StandardCharsets.ISO_8859_1))).equalsIgnoreCase(p.get("response"))) {
+                    challenge(response);
+                    return;
+                }
+
+                byte[] body = BODY.getBytes(StandardCharsets.ISO_8859_1);
+                // RFC 7616 §3.5: for auth-int the rspauth's A2 is ":" request-uri ":" H(response entity-body).
+                String responseA2 = ':' + p.get("uri") + ':' + md5Hex(body);
+                String rspauth = kd(p, md5Hex(responseA2.getBytes(StandardCharsets.ISO_8859_1)));
+
+                response.addHeader("Authentication-Info", "rspauth=\"" + rspauth + "\", qop=auth-int");
+                response.addHeader("X-Auth", authz);
+                response.setStatus(HttpServletResponse.SC_OK);
+                response.getOutputStream().write(body);
+                response.getOutputStream().close();
+            } catch (Exception e) {
+                throw new ServletException(e);
+            }
+        }
+
+        private void challenge(HttpServletResponse response) throws IOException {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            // auth-int alone: Realm.Builder.parseRawQop prefers "auth" whenever both are offered.
+            response.setHeader("WWW-Authenticate", "Digest realm=\"" + realm + "\", nonce=\"" + nonce
+                    + "\", algorithm=MD5, qop=\"auth-int\"");
+            response.getOutputStream().close();
+        }
+
+        /** {@code KD(H(A1), nonce ":" nc ":" cnonce ":" qop ":" H(A2))}. */
+        private String kd(Map<String, String> p, String ha2) throws Exception {
+            String ha1 = md5Hex((USER + ':' + realm + ':' + ADMIN).getBytes(StandardCharsets.ISO_8859_1));
+            String input = ha1 + ':' + nonce + ':' + p.get("nc") + ':' + p.get("cnonce") + ':' + p.get("qop") + ':' + ha2;
+            return md5Hex(input.getBytes(StandardCharsets.ISO_8859_1));
+        }
+
+        private static String md5Hex(byte[] bytes) throws Exception {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            StringBuilder sb = new StringBuilder(32);
+            for (byte b : md.digest(bytes)) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
         }
     }
 

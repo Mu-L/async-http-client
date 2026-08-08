@@ -197,8 +197,9 @@ public final class AuthenticatorUtils {
      * @param sentCredentials the {@code Authorization} or {@code Proxy-Authorization} header value sent with
      *                        the request being answered
      * @return the expected rspauth, or {@code null} when it cannot be derived — no Digest credentials were
-     * sent (a CONNECT is answered before any are), the header is missing parameters, or the algorithm is
-     * unsupported. Callers must then skip verification rather than enforce a value known to be wrong.
+     * sent (a CONNECT is answered before any are), the header is missing parameters, the algorithm is
+     * unsupported, or {@code qop=auth-int} signs a response body that has not arrived yet. Callers must then
+     * skip verification rather than enforce a value known to be wrong.
      */
     public static @Nullable String computeExpectedRspAuth(Realm realm, String sentCredentials) {
         if (!sentCredentials.regionMatches(true, 0, "Digest", 0, 6)) {
@@ -215,6 +216,14 @@ public final class AuthenticatorUtils {
         String nc = Realm.Builder.matchParam(sentCredentials, "nc");
         String cnonce = Realm.Builder.matchParam(sentCredentials, "cnonce");
         if (qop != null && (nc == null || cnonce == null)) {
+            return null;
+        }
+        if ("auth-int".equalsIgnoreCase(qop)) {
+            // RFC 7616 Section 3.5: under auth-int, A2 = ":" request-uri ":" H(entity-body), hashed over the
+            // RESPONSE entity-body. This runs from the response HEADERS, before a single byte of that body has
+            // been read, so the value an honest server signed is not derivable here. Computing the auth-only
+            // A2 instead yields a digest that never matches, which would abort every conformant auth-int
+            // exchange. Report "cannot verify" and let the caller warn and deliver.
             return null;
         }
 
