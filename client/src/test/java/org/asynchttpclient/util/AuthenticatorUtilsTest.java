@@ -576,10 +576,46 @@ public class AuthenticatorUtilsTest {
         // An algorithm we cannot hash with must not blow up the response path.
         assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm,
                 "Digest nonce=\"n\", uri=\"/\", algorithm=SHA-1, response=\"x\""));
-        // ...including a spelling the digest pool rejects rather than reports. The value is echoed from the
-        // server's own challenge, so it must not be able to throw out of the response path.
-        assertNull(AuthenticatorUtils.computeExpectedRspAuth(realm,
-                "Digest nonce=\"n\", uri=\"/\", algorithm=MD5-SESS, qop=auth, nc=00000001, cnonce=\"c\""));
+    }
+
+    /**
+     * The algorithm is echoed from the server's own challenge, so the SERVER picks its spelling. Every
+     * spelling of a supported algorithm must therefore verify, and verify identically — a spelling that
+     * passes the (case-insensitive) support gate but is then stripped case-sensitively used to reach the
+     * digest pool, throw, and be reported as "cannot verify", handing any server a one-word opt-out of
+     * mutual authentication.
+     */
+    @Test
+    void computeExpectedRspAuthVerifiesEverySpellingOfTheSessionVariants() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .setScheme(Realm.AuthScheme.DIGEST)
+                .setRealmName("testrealm")
+                .setNonce("nonce")
+                .setQop("auth")
+                .build();
+
+        String reference = referenceSessRspAuth("MD5", "user", "testrealm", "pass", "live-nonce", "00000002",
+                "deadbeefdeadbeef", "auth", "/path");
+        for (String spelling : new String[]{"MD5-sess", "MD5-SESS", "MD5-Sess", "md5-sess"}) {
+            String expected = AuthenticatorUtils.computeExpectedRspAuth(realm, sentCredentials(spelling));
+            assertNotNull(expected, "no verification performed for algorithm=" + spelling);
+            assertEquals(reference, expected, "wrong rspauth for algorithm=" + spelling);
+        }
+
+        // ...and the same holds for the SHA session variants.
+        assertEquals(referenceSessRspAuth("SHA-256", "user", "testrealm", "pass", "live-nonce", "00000002",
+                        "deadbeefdeadbeef", "auth", "/path"),
+                AuthenticatorUtils.computeExpectedRspAuth(realm, sentCredentials("SHA-256-SESS")));
+
+        // The session variants really do differ from the plain ones, so the loop above is not asserting that
+        // "-sess" was quietly ignored.
+        assertNotEquals(reference, referenceRspAuth("user", "testrealm", "pass", "live-nonce", "00000002",
+                "deadbeefdeadbeef", "auth", "/path"));
+    }
+
+    private static String sentCredentials(String algorithm) {
+        return "Digest username=\"user\", realm=\"testrealm\", nonce=\"live-nonce\", uri=\"/path\", algorithm="
+                + algorithm + ", response=\"ignored\", qop=auth, nc=00000002, cnonce=\"deadbeefdeadbeef\"";
     }
 
     private static String referenceRspAuth(String username, String realmName, String password, String nonce,
@@ -588,6 +624,30 @@ public class AuthenticatorUtilsTest {
             MessageDigest md = MessageDigest.getInstance("MD5");
             String ha1 = MessageDigestUtils.bytesToHex(md.digest(
                     (username + ':' + realmName + ':' + password).getBytes(StandardCharsets.ISO_8859_1)));
+            md.reset();
+            String ha2 = MessageDigestUtils.bytesToHex(md.digest((':' + uri).getBytes(StandardCharsets.ISO_8859_1)));
+            md.reset();
+            String kd = ha1 + ':' + nonce + ':' + nc + ':' + cnonce + ':' + qop + ':' + ha2;
+            return MessageDigestUtils.bytesToHex(md.digest(kd.getBytes(StandardCharsets.ISO_8859_1)));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * RFC 7616 Section 3.4.2 session variant: HA1 = H(H(username:realm:password) ":" nonce ":" cnonce), and
+     * for rspauth A2 = ":" uri.
+     */
+    private static String referenceSessRspAuth(String hashAlgorithm, String username, String realmName,
+                                               String password, String nonce, String nc, String cnonce,
+                                               String qop, String uri) throws RuntimeException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-512-256".equals(hashAlgorithm) ? "SHA-512/256" : hashAlgorithm);
+            String ha1 = MessageDigestUtils.bytesToHex(md.digest(
+                    (username + ':' + realmName + ':' + password).getBytes(StandardCharsets.ISO_8859_1)));
+            md.reset();
+            ha1 = MessageDigestUtils.bytesToHex(md.digest(
+                    (ha1 + ':' + nonce + ':' + cnonce).getBytes(StandardCharsets.ISO_8859_1)));
             md.reset();
             String ha2 = MessageDigestUtils.bytesToHex(md.digest((':' + uri).getBytes(StandardCharsets.ISO_8859_1)));
             md.reset();

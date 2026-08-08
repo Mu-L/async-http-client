@@ -35,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.PROXY_AUTHORIZATION;
@@ -56,6 +57,34 @@ public final class AuthenticatorUtils {
     private static final Set<String> SUPPORTED_ALGORITHMS = Set.of(
             "MD5", "MD5-SESS", "SHA-256", "SHA-256-SESS", "SHA-512-256", "SHA-512-256-SESS"
     );
+
+    private static final String SESS_SUFFIX = "-sess";
+
+    /**
+     * Whether {@code algorithm} names an RFC 7616 Section 3.3 session variant.
+     * <p>
+     * The suffix is matched case-insensitively, as {@link Realm.Builder} already does when it computes the
+     * request digest. Algorithm names are echoed from the server's own challenge, so the SERVER picks the
+     * spelling; a case-sensitive test makes it steerable, disagreeing with the request side on what
+     * {@code MD5-SESS} means.
+     */
+    private static boolean isSessionVariant(String algorithm) {
+        return algorithm.regionMatches(true, algorithm.length() - SESS_SUFFIX.length(), SESS_SUFFIX, 0,
+                SESS_SUFFIX.length());
+    }
+
+    /**
+     * The name to hash with: {@code algorithm} without its session suffix, since {@code MD5-sess} and
+     * {@code MD5} share the MD5 hash and differ only in how A1 is built.
+     * <p>
+     * Stripping case-sensitively would leave a server-chosen {@code MD5-SESS} intact all the way to
+     * {@link MessageDigestUtils#pooledMessageDigest}, which rejects it.
+     */
+    private static String hashAlgorithm(String algorithm) {
+        return isSessionVariant(algorithm)
+                ? algorithm.substring(0, algorithm.length() - SESS_SUFFIX.length())
+                : algorithm;
+    }
 
     public static @Nullable String getHeaderWithPrefix(@Nullable List<String> authenticateHeaders, String prefix) {
         if (authenticateHeaders != null) {
@@ -81,7 +110,7 @@ public final class AuthenticatorUtils {
         for (String header : authenticateHeaders) {
             if (header.regionMatches(true, 0, "Digest", 0, 6)) {
                 String algorithm = Realm.Builder.matchParam(header, "algorithm");
-                if (algorithm == null || SUPPORTED_ALGORITHMS.contains(algorithm.toUpperCase())) {
+                if (algorithm == null || SUPPORTED_ALGORITHMS.contains(algorithm.toUpperCase(Locale.ROOT))) {
                     return header;
                 }
             }
@@ -160,7 +189,7 @@ public final class AuthenticatorUtils {
      * userhash = H(username ":" realm)
      */
     static String computeUserhash(String username, String realmName, String algorithm, Charset charset) {
-        String hashAlgorithm = algorithm != null ? algorithm.replace("-sess", "") : "MD5";
+        String hashAlgorithm = algorithm != null ? hashAlgorithm(algorithm) : "MD5";
         MessageDigest md = MessageDigestUtils.pooledMessageDigest(hashAlgorithm);
         try {
             String input = username + ":" + realmName;
@@ -231,7 +260,7 @@ public final class AuthenticatorUtils {
         if (algorithm == null) {
             algorithm = realm.getAlgorithm();
         }
-        if (algorithm != null && !SUPPORTED_ALGORITHMS.contains(algorithm.toUpperCase())) {
+        if (algorithm != null && !SUPPORTED_ALGORITHMS.contains(algorithm.toUpperCase(Locale.ROOT))) {
             return null;
         }
 
@@ -259,7 +288,7 @@ public final class AuthenticatorUtils {
                                          @Nullable String nonce, @Nullable String nc, @Nullable String cnonce,
                                          @Nullable String qop, String requestUri) {
         String algo = algorithm != null ? algorithm : "MD5";
-        String hashAlgorithm = algo.replace("-sess", "");
+        String hashAlgorithm = hashAlgorithm(algo);
         Charset wireCs = realm.getCharset() != null ? realm.getCharset() : ISO_8859_1;
 
         // Calculate HA1 (same as request); for the "-sess" variants HA1 folds in the cnonce too.
@@ -308,7 +337,7 @@ public final class AuthenticatorUtils {
                                        @Nullable String nonce, @Nullable String cnonce) {
         Charset wireCs = realm.getCharset() != null ? realm.getCharset() : StandardCharsets.ISO_8859_1;
         String a1Base = realm.getPrincipal() + ':' + realmName + ':' + realm.getPassword();
-        String hashAlgorithm = algorithm.replace("-sess", "");
+        String hashAlgorithm = hashAlgorithm(algorithm);
 
         MessageDigest md = MessageDigestUtils.pooledMessageDigest(hashAlgorithm);
         try {
@@ -316,7 +345,7 @@ public final class AuthenticatorUtils {
             String ha1 = MessageDigestUtils.bytesToHex(md.digest());
 
 
-            if (algorithm.endsWith("-sess")) {
+            if (isSessionVariant(algorithm)) {
                 // For -sess: HA1 = H(H(username:realm:password):nonce:cnonce)
                 String sessInput = ha1 + ":" + nonce + ":" + cnonce;
                 md.reset();
@@ -341,7 +370,7 @@ public final class AuthenticatorUtils {
             // No body to hash, return hash of empty string
 
             String algorithm = realm.getAlgorithm() != null ? realm.getAlgorithm() : "MD5";
-            String hashAlgorithm = algorithm.replace("-sess", "");
+            String hashAlgorithm = hashAlgorithm(algorithm);
 
             MessageDigest md = MessageDigestUtils.pooledMessageDigest(hashAlgorithm);
             try {
@@ -352,7 +381,7 @@ public final class AuthenticatorUtils {
         }
 
         String algorithm = realm.getAlgorithm() != null ? realm.getAlgorithm() : "MD5";
-        String hashAlgorithm = algorithm.replace("-sess", "");
+        String hashAlgorithm = hashAlgorithm(algorithm);
         Charset charset = resolveCharset(request, realm);
 
 

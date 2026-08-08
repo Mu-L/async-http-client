@@ -178,6 +178,52 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
         }
     }
 
+    /**
+     * The {@code algorithm} the client verifies against is echoed from the server's own challenge, so the
+     * server picks its spelling. {@code MD5-SESS} passed the (case-insensitive) support gate but was then
+     * stripped case-sensitively, so it reached the digest pool intact, threw, and was reported as "cannot
+     * verify" — a one-word opt-out of mutual authentication that any server could take.
+     */
+    @RepeatedIfExceptionsTest(repeats = 5)
+    public void invalidRspAuthIsRejectedWhateverTheSpellingOfTheAlgorithm() throws Exception {
+        for (String spelling : new String[]{"MD5-SESS", "MD5-Sess", "MD5-sess", "SHA-256-SESS"}) {
+            restartServer(new SessRspAuthHandler(spelling, true));
+
+            try (AsyncHttpClient client = asyncHttpClient()) {
+                Future<Response> f = client.prepareGet("http://localhost:" + port1 + '/')
+                        .setRealm(digestAuthRealm(USER, ADMIN).setRealmName("MyRealm").build())
+                        .execute();
+                ExecutionException ex = assertThrows(ExecutionException.class, () -> f.get(20, TimeUnit.SECONDS),
+                        "a corrupt rspauth was accepted for algorithm=" + spelling);
+                assertNotNull(ex.getCause());
+                assertTrue(ex.getCause().getMessage() != null && ex.getCause().getMessage().contains("rspauth"),
+                        "expected an rspauth verification failure for algorithm=" + spelling + " but got: " + ex.getCause());
+            }
+        }
+    }
+
+    /**
+     * The other half of {@link #invalidRspAuthIsRejectedWhateverTheSpellingOfTheAlgorithm()}: an honest
+     * session-variant server must still be accepted, so the spellings above are genuinely being verified
+     * rather than uniformly rejected.
+     */
+    @RepeatedIfExceptionsTest(repeats = 5)
+    public void validSessionVariantRspAuthIsAccepted() throws Exception {
+        for (String spelling : new String[]{"MD5-SESS", "MD5-sess", "SHA-256-SESS"}) {
+            restartServer(new SessRspAuthHandler(spelling, false));
+
+            try (AsyncHttpClient client = asyncHttpClient()) {
+                Future<Response> f = client.prepareGet("http://localhost:" + port1 + '/')
+                        .setRealm(digestAuthRealm(USER, ADMIN).setRealmName("MyRealm").build())
+                        .execute();
+                Response resp = f.get(60, TimeUnit.SECONDS);
+                assertNotNull(resp);
+                assertEquals(HttpServletResponse.SC_OK, resp.getStatusCode(), "algorithm=" + spelling);
+                assertNotNull(resp.getHeader("X-Auth"), "algorithm=" + spelling);
+            }
+        }
+    }
+
     private void restartServer(AbstractHandler handler) throws Exception {
         server.stop();
         server = new Server();
@@ -225,6 +271,73 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
         @Override
         public void setStatus(int ignored) {
             super.setStatus(status);
+        }
+    }
+
+    /**
+     * A server that challenges with one of the RFC 7616 Section 3.3 session variants, in whatever spelling it
+     * is handed. It does the full {@code -sess} math itself: HA1 = H(H(user:realm:pass) ":" nonce ":" cnonce),
+     * on both the request it validates and the rspauth it signs.
+     */
+    private static class SessRspAuthHandler extends AbstractHandler {
+        private final String realm = "MyRealm";
+        private final String advertisedAlgorithm;
+        private final String hashAlgorithm;
+        private final String nonce = ExtendedDigestAuthenticator.newNonce();
+        private final boolean corruptRspAuth;
+
+        SessRspAuthHandler(String advertisedAlgorithm, boolean corruptRspAuth) {
+            this.advertisedAlgorithm = advertisedAlgorithm;
+            this.hashAlgorithm = ExtendedDigestAuthenticator.findAlgorithm(advertisedAlgorithm);
+            this.corruptRspAuth = corruptRspAuth;
+        }
+
+        @Override
+        public void handle(String target, Request r, HttpServletRequest request, HttpServletResponse response)
+                throws IOException, ServletException {
+            String authz = request.getHeader("Authorization");
+            if (authz == null || !authz.startsWith("Digest ")) {
+                challenge(response);
+                return;
+            }
+
+            Map<String, String> p = ExtendedDigestAuthenticator.parseCredentials(authz.substring("Digest ".length()));
+            try {
+                String expectedResponse = kd(p, RspAuthHandler.hex(digest((request.getMethod() + ':' + p.get("uri"))
+                        .getBytes(StandardCharsets.ISO_8859_1))));
+                if (!USER.equals(p.get("username")) || !expectedResponse.equalsIgnoreCase(p.get("response"))) {
+                    challenge(response);
+                    return;
+                }
+
+                String rspauth = kd(p, RspAuthHandler.hex(digest((':' + p.get("uri")).getBytes(StandardCharsets.ISO_8859_1))));
+                response.addHeader("Authentication-Info", "rspauth=\"" + (corruptRspAuth ? RspAuthHandler.mangle(rspauth) : rspauth) + '"');
+                response.addHeader("X-Auth", authz);
+                response.setStatus(HttpServletResponse.SC_OK);
+                response.getOutputStream().flush();
+                response.getOutputStream().close();
+            } catch (Exception e) {
+                throw new ServletException(e);
+            }
+        }
+
+        private void challenge(HttpServletResponse response) throws IOException {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setHeader("WWW-Authenticate", "Digest realm=\"" + realm + "\", nonce=\"" + nonce
+                    + "\", algorithm=" + advertisedAlgorithm + ", qop=\"auth\"");
+            response.getOutputStream().close();
+        }
+
+        private String kd(Map<String, String> p, String ha2) throws Exception {
+            String ha1 = RspAuthHandler.hex(digest((USER + ':' + realm + ':' + ADMIN).getBytes(StandardCharsets.ISO_8859_1)));
+            // The session variant folds the nonce and cnonce into HA1.
+            ha1 = RspAuthHandler.hex(digest((ha1 + ':' + nonce + ':' + p.get("cnonce")).getBytes(StandardCharsets.ISO_8859_1)));
+            String input = ha1 + ':' + nonce + ':' + p.get("nc") + ':' + p.get("cnonce") + ':' + p.get("qop") + ':' + ha2;
+            return RspAuthHandler.hex(digest(input.getBytes(StandardCharsets.ISO_8859_1)));
+        }
+
+        private byte[] digest(byte[] bytes) throws Exception {
+            return ExtendedDigestAuthenticator.getMessageDigest(hashAlgorithm).digest(bytes);
         }
     }
 
