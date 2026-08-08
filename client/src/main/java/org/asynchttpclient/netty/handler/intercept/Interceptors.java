@@ -99,10 +99,17 @@ public class Interceptors {
         // client-wide credentials to a redirect target whose auth was just stripped, leaking them
         // to a different origin that answers 401.
         Realm realm = future.getRealm();
+        boolean connectRequest = httpRequest.method() == HttpMethod.CONNECT;
 
         // This MUST BE called before Redirect30xInterceptor because latter assumes cookie store is already updated
         CookieStore cookieStore = config.getCookieStore();
-        if (cookieStore != null) {
+        // A CONNECT is answered by the proxy over a hop that is still plaintext, so its Set-Cookie was written
+        // by the proxy — or by anyone on the path — and not by the origin. The store is keyed on
+        // getCurrentRequest().getUri(), which is the ORIGIN's URI throughout the tunnel handshake, so filing
+        // it here plants an attacker-chosen cookie against the origin; the very next request carries it back
+        // inside TLS. Session fixation and CSRF-token overwrite both follow (CWE-384). Cookies the origin
+        // itself sets inside the tunnel arrive on a non-CONNECT exchange and are stored as before.
+        if (cookieStore != null && !connectRequest) {
             for (String cookieStr : responseHeaders.getAll(SET_COOKIE)) {
                 Cookie c = cookieDecoder.decode(cookieStr);
                 if (c != null) {
@@ -120,7 +127,7 @@ public class Interceptors {
         // it. Only the two interceptors that speak to the proxy may answer it: the origin-request ones
         // rebuild the exchange as the origin request on a reused channel, which on a rejected CONNECT means
         // sending the origin request — and its credentials — to the proxy in the clear.
-        if (httpRequest.method() == HttpMethod.CONNECT) {
+        if (connectRequest) {
             if (statusCode == OK_200) {
                 return connectSuccessInterceptor.exitAfterHandlingConnect(channel, future, request, proxyServer);
             }
