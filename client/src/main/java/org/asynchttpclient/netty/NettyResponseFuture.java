@@ -16,6 +16,7 @@
 package org.asynchttpclient.netty;
 
 import io.netty.channel.Channel;
+import io.netty.handler.codec.http.HttpMethod;
 import org.asynchttpclient.AsyncHandler;
 import org.asynchttpclient.ListenableFuture;
 import org.asynchttpclient.Realm;
@@ -411,6 +412,14 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
         if (previous != null && previous != nettyRequest && !previous.isHandedToChannel()) {
             previous.release();
         }
+        if (nettyRequest != null && nettyRequest.getHttpRequest().method() == HttpMethod.CONNECT) {
+            // A new tunnel attempt is starting, so whatever an earlier CONNECT established no longer holds:
+            // this one has not been answered yet. Re-arming here rather than at the call sites means no path
+            // that attaches a CONNECT — a 407 retry, or a cross-host redirect that needs a fresh tunnel — can
+            // leave the flag reading true while the socket is once again a plaintext hop to the proxy. Only
+            // ConnectSuccessInterceptor sets it back.
+            tunnelEstablished = false;
+        }
         this.nettyRequest = nettyRequest;
     }
 
@@ -516,7 +525,8 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
     /**
      * Whether a proxy CONNECT on the currently attached channel succeeded, so the socket now carries a
      * tunnel to the origin rather than a plaintext hop to the proxy. Only
-     * {@code ConnectSuccessInterceptor} sets this.
+     * {@code ConnectSuccessInterceptor} sets this, and {@link #setNettyRequest} clears it again the moment
+     * another CONNECT is attached, so it always describes the CONNECT in flight rather than an earlier one.
      */
     public boolean isTunnelEstablished() {
         return tunnelEstablished;
