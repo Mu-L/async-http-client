@@ -73,6 +73,18 @@ public class ProxyUnauthorized407Interceptor {
     public boolean exitAfterHandling407(Channel channel, NettyResponseFuture<?> future, HttpResponse response, Request request,
                                         ProxyServer proxyServer, HttpRequest httpRequest) {
 
+        // Once the CONNECT has been accepted the far end of this socket is the ORIGIN, so a 407 arriving on
+        // it was written by the origin no matter what kind of proxy is configured. Asking what the proxy is
+        // answers a different question than who sent this: with an HTTP proxy the type test below passes and
+        // the origin's challenge gets answered with the PROXY's credentials, inside the tunnel — a Basic
+        // header the origin can decode, or an NTLM Type-1 that starts a handshake it can drive.
+        // setNettyRequest re-arms this flag on every new CONNECT, so a legitimate 407 on a CONNECT (which is
+        // the only 407 the proxy itself can send) is still handled below.
+        if (future.isTunnelEstablished()) {
+            LOGGER.debug("Can't handle 407: the CONNECT succeeded, so this 407 came from the origin");
+            return false;
+        }
+
         Realm proxyRealm = future.getProxyRealm();
 
         if (proxyRealm == null) {

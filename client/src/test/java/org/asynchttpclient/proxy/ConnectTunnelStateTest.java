@@ -47,6 +47,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
@@ -62,6 +63,7 @@ import static org.asynchttpclient.test.TestUtils.addHttpConnector;
 import static org.asynchttpclient.test.TestUtils.addHttpsConnector;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -82,6 +84,8 @@ public class ConnectTunnelStateTest {
     private static final String ORIGIN_PASSWORD = "origin-secret";
     private static final String PROXY_USER = "proxy-user";
     private static final String PROXY_PASSWORD = "proxy-secret";
+
+    private static final String ORIGIN_407_PATH = "/pretend-to-be-a-proxy";
 
     private static final String CONNECT_401 = "HTTP/1.1 401 Unauthorized\r\n"
             + "WWW-Authenticate: Basic realm=\"origin\"\r\n"
@@ -197,9 +201,13 @@ public class ConnectTunnelStateTest {
 
     private Server tunnellingProxy;
     private Server httpsOrigin;
+    private Server challengingProxy;
     private int tunnellingProxyPort;
     private int httpsOriginPort;
+    private int challengingProxyPort;
     private final AtomicReference<String> connectProxyAuthorization = new AtomicReference<>();
+    // Every Proxy-Authorization the ORIGIN saw at the far end of the tunnel. Must stay empty.
+    private final List<String> originProxyAuthorizations = Collections.synchronizedList(new ArrayList<>());
 
     @BeforeAll
     public void startTunnellingServers() throws Exception {
@@ -214,12 +222,21 @@ public class ConnectTunnelStateTest {
         tunnellingProxy.setHandler(new RecordingConnectHandler());
         tunnellingProxy.start();
         tunnellingProxyPort = proxyConnector.getLocalPort();
+
+        challengingProxy = new Server();
+        ServerConnector challengingConnector = addHttpConnector(challengingProxy);
+        challengingProxy.setHandler(new ChallengingConnectHandler());
+        challengingProxy.start();
+        challengingProxyPort = challengingConnector.getLocalPort();
     }
 
     @AfterAll
     public void stopTunnellingServers() throws Exception {
         if (tunnellingProxy != null) {
             tunnellingProxy.stop();
+        }
+        if (challengingProxy != null) {
+            challengingProxy.stop();
         }
         if (httpsOrigin != null) {
             httpsOrigin.stop();
@@ -249,6 +266,77 @@ public class ConnectTunnelStateTest {
         }
     }
 
+    // ---------------------------------------------------------------------------------------------------
+    // (v): once the tunnel is up, a 407 comes from the ORIGIN
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * After a successful CONNECT the peer on this socket is the origin, but the configured proxy is still an
+     * HTTP one — so a gate that asks what kind of proxy is configured, rather than who wrote this response,
+     * lets the origin's 407 be answered with the PROXY's credentials, inside the tunnel.
+     * <p>
+     * The proxy realm must be non-preemptive: a preemptive one puts the header on the request from the start
+     * and hides which code path produced it.
+     */
+    @Test
+    public void origin407OverAnEstablishedTunnelNeverSeesTheProxyCredentials() throws Exception {
+        originProxyAuthorizations.clear();
+
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setUseInsecureTrustManager(true)
+                .setProxyServer(proxyServer("localhost", tunnellingProxyPort)
+                        .setRealm(basicAuthRealm(PROXY_USER, PROXY_PASSWORD)))
+                .setRequestTimeout(Duration.ofSeconds(20)))) {
+
+            // Collected rather than thrown: answering the origin's 407 rebuilds the request as a CONNECT and
+            // writes it into the tunnel, which then trips a second TLS handshake on an already-encrypted
+            // socket. That SSLException is the fallout, not the finding — assert on what the origin received
+            // first, so a failure names the leak rather than a symptom of it.
+            Response response = null;
+            Throwable failure = null;
+            try {
+                response = client.prepareGet("https://localhost:" + httpsOriginPort + ORIGIN_407_PATH)
+                        .execute().get(30, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                failure = e.getCause();
+            }
+
+            assertTrue(originProxyAuthorizations.isEmpty(),
+                    "the origin was answered with the proxy's credentials: " + originProxyAuthorizations);
+            assertNull(failure, "the exchange must complete normally: " + failure);
+            assertNotNull(response);
+            assertNull(response.getHeader("X-Saw-Proxy-Authorization"));
+            assertEquals(407, response.getStatusCode(), "the origin's 407 must be delivered as-is");
+        }
+    }
+
+    /**
+     * The other side of the guard: a 407 the proxy sends on the CONNECT itself arrives before any tunnel
+     * exists, and must still be answered with the proxy credentials.
+     */
+    @Test
+    public void proxy407OnTheConnectItselfStillAuthenticates() throws Exception {
+        connectProxyAuthorization.set(null);
+        originProxyAuthorizations.clear();
+
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setUseInsecureTrustManager(true)
+                .setProxyServer(proxyServer("localhost", challengingProxyPort)
+                        .setRealm(basicAuthRealm(PROXY_USER, PROXY_PASSWORD)))
+                .setRequestTimeout(Duration.ofSeconds(20)))) {
+
+            Response response = client.prepareGet("https://localhost:" + httpsOriginPort + "/secret")
+                    .execute().get(30, TimeUnit.SECONDS);
+
+            assertEquals(200, response.getStatusCode(), "the retried CONNECT must have been accepted");
+            assertEquals(basic(PROXY_USER, PROXY_PASSWORD), connectProxyAuthorization.get(),
+                    "the proxy's own 407 must still be answered with the proxy credentials");
+            // ...and the credentials stayed on the CONNECT, they did not follow the request into the tunnel.
+            assertTrue(originProxyAuthorizations.isEmpty(),
+                    "proxy credentials reached the origin: " + originProxyAuthorizations);
+        }
+    }
+
     private class RecordingConnectHandler extends ConnectHandler {
         @Override
         public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
@@ -264,7 +352,7 @@ public class ConnectTunnelStateTest {
      * Echoes the credential headers it received back as response headers, so a test can see what came out
      * of the far end of the tunnel.
      */
-    private static class AuthEchoHandler extends AbstractHandler {
+    private class AuthEchoHandler extends AbstractHandler {
         @Override
         public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
                 throws IOException {
@@ -275,10 +363,34 @@ public class ConnectTunnelStateTest {
             String proxyAuthorization = request.getHeader("Proxy-Authorization");
             if (proxyAuthorization != null) {
                 response.setHeader("X-Saw-Proxy-Authorization", proxyAuthorization);
+                originProxyAuthorizations.add(proxyAuthorization);
             }
-            response.setStatus(HttpServletResponse.SC_OK);
+            if (ORIGIN_407_PATH.equals(target)) {
+                // The origin, inside the tunnel, claims to be a proxy demanding authentication.
+                response.setStatus(HttpServletResponse.SC_PROXY_AUTHENTICATION_REQUIRED);
+                response.setHeader("Proxy-Authenticate", "Basic realm=\"origin-pretending-to-be-a-proxy\"");
+            } else {
+                response.setStatus(HttpServletResponse.SC_OK);
+            }
             baseRequest.setHandled(true);
             response.getOutputStream().close();
+        }
+    }
+
+    /**
+     * A proxy that demands Basic proxy authentication on the CONNECT itself and tunnels once it gets it.
+     * Jetty's own 407 carries no Proxy-Authenticate, so the challenge is added here.
+     */
+    private class ChallengingConnectHandler extends ConnectHandler {
+        @Override
+        protected boolean handleAuthentication(HttpServletRequest request, HttpServletResponse response, String address) {
+            String credentials = request.getHeader("Proxy-Authorization");
+            if (basic(PROXY_USER, PROXY_PASSWORD).equals(credentials)) {
+                connectProxyAuthorization.set(credentials);
+                return true;
+            }
+            response.setHeader("Proxy-Authenticate", "Basic realm=\"proxy\"");
+            return false;
         }
     }
 
