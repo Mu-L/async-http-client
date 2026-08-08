@@ -77,11 +77,19 @@ public class ProxyUnauthorized407Interceptor {
         // it was written by the origin no matter what kind of proxy is configured. Asking what the proxy is
         // answers a different question than who sent this: with an HTTP proxy the type test below passes and
         // the origin's challenge gets answered with the PROXY's credentials, inside the tunnel — a Basic
-        // header the origin can decode, or an NTLM Type-1 that starts a handshake it can drive.
-        // setNettyRequest re-arms this flag on every new CONNECT, so a legitimate 407 on a CONNECT (which is
-        // the only 407 the proxy itself can send) is still handled below.
-        if (future.isTunnelEstablished()) {
-            LOGGER.debug("Can't handle 407: the CONNECT succeeded, so this 407 came from the origin");
+        // header the origin can decode, a Digest response over a nonce the origin chose, or an NTLM Type-1
+        // that starts a handshake it can drive.
+        //
+        // isTunnelEstablished() alone is not enough: it lives on the future, but the tunnel lives on the
+        // socket. A channel taken from the pool carries a tunnel built by an earlier exchange, so the flag
+        // is false on this future while the far end is still the origin. The target tells us the rest: the
+        // pool is partitioned on the base URL (scheme included), so a tunnelled channel is only ever handed
+        // to a secured or WebSocket target, and those always reach the proxy through a CONNECT. Anything
+        // that is not itself a CONNECT and is aimed at such a target is therefore talking to the origin.
+        // A legitimate 407 from the proxy always answers the CONNECT, which this lets through.
+        if (!CONNECT.equals(httpRequest.method().name())
+                && (future.isTunnelEstablished() || request.getUri().isSecured() || request.getUri().isWebSocket())) {
+            LOGGER.debug("Can't handle 407: this request is tunnelled, so the 407 came from the origin");
             return false;
         }
 

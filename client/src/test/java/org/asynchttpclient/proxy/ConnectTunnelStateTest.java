@@ -208,6 +208,8 @@ public class ConnectTunnelStateTest {
     private final AtomicReference<String> connectProxyAuthorization = new AtomicReference<>();
     // Every Proxy-Authorization the ORIGIN saw at the far end of the tunnel. Must stay empty.
     private final List<String> originProxyAuthorizations = Collections.synchronizedList(new ArrayList<>());
+    // Every CONNECT the tunnelling proxy was asked for, so a test can tell a reused tunnel from a fresh one.
+    private final List<String> connectTargets = Collections.synchronizedList(new ArrayList<>());
 
     @BeforeAll
     public void startTunnellingServers() throws Exception {
@@ -311,6 +313,54 @@ public class ConnectTunnelStateTest {
     }
 
     /**
+     * The same leak, one exchange later, which a single-request test cannot see.
+     * <p>
+     * {@code isTunnelEstablished()} lives on the future, but the tunnel lives on the socket. The first
+     * exchange builds the tunnel and returns the channel to the pool; the second polls it back on a fresh
+     * future where the flag is {@code false} while the far end is still the origin. A guard that trusts the
+     * flag alone therefore passes, and the origin's 407 is answered with the proxy's credentials — so this
+     * asserts across two exchanges on one client, and checks the second reused the tunnel rather than
+     * opening a new one.
+     */
+    @Test
+    public void origin407OverATunnelInheritedFromThePoolNeverSeesTheProxyCredentials() throws Exception {
+        originProxyAuthorizations.clear();
+        connectTargets.clear();
+
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setUseInsecureTrustManager(true)
+                .setProxyServer(proxyServer("localhost", tunnellingProxyPort)
+                        .setRealm(basicAuthRealm(PROXY_USER, PROXY_PASSWORD)))
+                .setRequestTimeout(Duration.ofSeconds(20)))) {
+
+            // First exchange: ordinary request, builds the tunnel and pools the channel.
+            Response first = client.prepareGet("https://localhost:" + httpsOriginPort + "/foo/test")
+                    .execute().get(30, TimeUnit.SECONDS);
+            assertEquals(200, first.getStatusCode());
+
+            // Second exchange on the pooled tunnel: the origin challenges with 407.
+            Response second = null;
+            Throwable failure = null;
+            try {
+                second = client.prepareGet("https://localhost:" + httpsOriginPort + ORIGIN_407_PATH)
+                        .execute().get(30, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                failure = e.getCause();
+            }
+
+            assertTrue(originProxyAuthorizations.isEmpty(),
+                    "the origin was answered with the proxy's credentials over a pooled tunnel: "
+                            + originProxyAuthorizations);
+            assertEquals(1, connectTargets.size(),
+                    "the second exchange must reuse the pooled tunnel, so only one CONNECT should be seen: "
+                            + connectTargets);
+            assertNull(failure, "the exchange must complete normally: " + failure);
+            assertNotNull(second);
+            assertEquals(407, second.getStatusCode(), "the origin's 407 must be delivered as-is");
+        }
+    }
+
+    /**
      * The other side of the guard: a 407 the proxy sends on the CONNECT itself arrives before any tunnel
      * exists, and must still be answered with the proxy credentials.
      */
@@ -343,6 +393,7 @@ public class ConnectTunnelStateTest {
                 throws ServletException, IOException {
             if ("CONNECT".equalsIgnoreCase(request.getMethod())) {
                 connectProxyAuthorization.set(request.getHeader("Proxy-Authorization"));
+                connectTargets.add(request.getRequestURI());
             }
             super.handle(target, baseRequest, request, response);
         }
