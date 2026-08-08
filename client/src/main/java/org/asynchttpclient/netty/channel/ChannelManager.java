@@ -32,6 +32,7 @@ import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.websocketx.WebSocket08FrameDecoder;
 import io.netty.handler.codec.http.websocketx.WebSocket08FrameEncoder;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
@@ -81,6 +82,7 @@ import org.asynchttpclient.netty.handler.Http2Handler;
 import org.asynchttpclient.netty.handler.Http2PingHandler;
 import org.asynchttpclient.netty.handler.HttpHandler;
 import org.asynchttpclient.netty.handler.WebSocketHandler;
+import org.asynchttpclient.netty.request.NettyRequest;
 import org.asynchttpclient.netty.request.NettyRequestSender;
 import org.asynchttpclient.netty.ssl.DefaultSslEngineFactory;
 import org.asynchttpclient.proxy.ProxyServer;
@@ -445,6 +447,36 @@ public class ChannelManager {
      */
     private Http1ContentDecompressor newHttpContentDecompressor() {
         return new Http1ContentDecompressor(config.isKeepEncodingHeader(), config.getMaxDecompressedResponseSize());
+    }
+
+    /**
+     * Whether the exchange being finished was a CONNECT that never became a tunnel. A CONNECT the proxy
+     * accepted is consumed by {@link org.asynchttpclient.netty.handler.intercept.ConnectSuccessInterceptor},
+     * which takes the channel over, so a CONNECT still on the future here means the proxy refused it and the
+     * socket is a plaintext hop to the proxy. Pooling it would let the next exchange for that origin send the
+     * origin request, {@code Authorization} included, down a hop the proxy is still reading in the clear.
+     * <p>
+     * The status check in {@code HttpHandler} closes this on the ordinary path, but a {@code ResponseFilter}
+     * asking for a replay short-circuits {@code exitAfterIntercept} before that check runs, so the guard has
+     * to live at the pool boundary too.
+     */
+    private static boolean isRefusedTunnel(NettyResponseFuture<?> future) {
+        NettyRequest nettyRequest = future.getNettyRequest();
+        return nettyRequest != null && nettyRequest.getHttpRequest().method() == HttpMethod.CONNECT;
+    }
+
+    public void tryToOfferChannelToPool(Channel channel, NettyResponseFuture<?> future, boolean keepAlive, Object partitionKey) {
+        tryToOfferChannelToPool(channel, future.getAsyncHandler(), keepAlive, partitionKey, isRefusedTunnel(future));
+    }
+
+    private void tryToOfferChannelToPool(Channel channel, AsyncHandler<?> asyncHandler, boolean keepAlive, Object partitionKey,
+                                         boolean refusedTunnel) {
+        if (refusedTunnel) {
+            LOGGER.debug("Not offering channel {} to the pool: the CONNECT on it was never established", channel);
+            closeChannel(channel);
+            return;
+        }
+        tryToOfferChannelToPool(channel, asyncHandler, keepAlive, partitionKey);
     }
 
     public final void tryToOfferChannelToPool(Channel channel, AsyncHandler<?> asyncHandler, boolean keepAlive, Object partitionKey) {
@@ -1172,10 +1204,16 @@ public class ChannelManager {
     }
 
     private OnLastHttpContentCallback newDrainCallback(final NettyResponseFuture<?> future, final Channel channel, final boolean keepAlive, final Object partitionKey) {
+
+        // Sampled here rather than in call(), for the same reason keepAlive and partitionKey are: callers
+        // hand the drain over and immediately move the future on to the NEXT request, so by the time the
+        // last chunk arrives the future no longer describes the response being drained off this channel.
+        final boolean refusedTunnel = isRefusedTunnel(future);
+
         return new OnLastHttpContentCallback(future) {
             @Override
             public void call() {
-                tryToOfferChannelToPool(channel, future.getAsyncHandler(), keepAlive, partitionKey);
+                tryToOfferChannelToPool(channel, future.getAsyncHandler(), keepAlive, partitionKey, refusedTunnel);
             }
         };
     }
