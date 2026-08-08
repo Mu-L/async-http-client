@@ -168,6 +168,34 @@ public class HttpsProxyTest extends AbstractBasicTest {
         }
     }
 
+    /**
+     * The inflater is only in the pipeline when automatic decompression is enabled, but the tunnel's SSL
+     * handler was inserted with {@code addBefore(INFLATER_HANDLER, ...)} unconditionally, so turning
+     * decompression off broke every HTTPS-through-a-proxy request with
+     * {@code NoSuchElementException: inflater}. GHSA-7grg recommends exactly that setting as its workaround,
+     * so it has to work.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("proxyTypeProvider")
+    public void testProxyWithAutomaticDecompressionDisabled(String testName, ProxyType proxyType) throws Exception {
+        int proxyPort = proxyType == ProxyType.HTTPS ? httpsProxyPort : this.proxyPort;
+
+        AsyncHttpClientConfig config = config()
+                .setFollowRedirect(true)
+                .setProxyServer(proxyServer("localhost", proxyPort).setProxyType(proxyType).build())
+                .setUseInsecureTrustManager(true)
+                .setEnableAutomaticDecompression(false)
+                .build();
+
+        try (AsyncHttpClient client = asyncHttpClient(config)) {
+            String body = "hello world";
+            Response response = client.executeRequest(post(getTargetUrl2()).setBody(body)).get();
+
+            assertEquals(200, response.getStatusCode());
+            assertEquals(body, response.getResponseBody());
+        }
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("proxyTypeProvider")
     public void testDecompressBodyWithProxy(String testName, ProxyType proxyType) throws Exception {

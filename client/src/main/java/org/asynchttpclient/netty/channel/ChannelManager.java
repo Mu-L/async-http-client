@@ -784,6 +784,25 @@ public class ChannelManager {
         return sslHandler;
     }
 
+    /**
+     * Inserts a tunnel's {@link SslHandler} at the head of the pipeline: ahead of every handler that has to
+     * see plaintext, but behind the trace {@link LoggingHandler}, which is added first precisely so it can
+     * log what goes on the wire.
+     * <p>
+     * The {@link #INFLATER_HANDLER} this used to be anchored on is not always there. It is added only when
+     * {@code enableAutomaticDecompression} is on, and never to a WebSocket pipeline, so the insertion threw
+     * {@code NoSuchElementException: inflater} and failed every HTTPS-through-an-HTTP-proxy request made with
+     * decompression disabled — the configuration GHSA-7grg recommends as its workaround. Where the inflater
+     * does exist it sits directly at this position, so the resulting pipeline is unchanged.
+     */
+    private static void addSslHandlerAtPipelineHead(ChannelPipeline pipeline, String name, SslHandler sslHandler) {
+        if (pipeline.get(LOGGING_HANDLER) != null) {
+            pipeline.addAfter(LOGGING_HANDLER, name, sslHandler);
+        } else {
+            pipeline.addFirst(name, sslHandler);
+        }
+    }
+
     public Future<Channel> updatePipelineForHttpTunneling(ChannelPipeline pipeline, Uri requestUri) {
         Future<Channel> whenHandshaked = null;
 
@@ -800,7 +819,7 @@ public class ChannelManager {
             }
             SslHandler sslHandler = createSslHandler(requestUri.getHost(), requestUri.getExplicitPort(), !requestUri.isWebSocket());
             whenHandshaked = sslHandler.handshakeFuture();
-            pipeline.addBefore(INFLATER_HANDLER, SSL_HANDLER, sslHandler);
+            addSslHandlerAtPipelineHead(pipeline, SSL_HANDLER, sslHandler);
             pipeline.addAfter(SSL_HANDLER, HTTP_CLIENT_CODEC, newHttpClientCodec());
 
         } else {
@@ -844,12 +863,14 @@ public class ChannelManager {
             if (isSslHandlerConfigured(pipeline)) {
                 // Insert target SSL handler after the proxy SSL handler
                 pipeline.addAfter(SSL_HANDLER, TARGET_SSL_HANDLER, sslHandler);
+                pipeline.addAfter(TARGET_SSL_HANDLER, HTTP_CLIENT_CODEC, newHttpClientCodec());
             } else {
-                // This shouldn't happen for HTTPS proxy, but fallback
-                pipeline.addBefore(INFLATER_HANDLER, SSL_HANDLER, sslHandler);
+                // This shouldn't happen for HTTPS proxy, but fallback: with no proxy SSL handler to nest
+                // inside, this is the only one on the pipeline, so it goes at the head under its own name —
+                // and the codec must then be anchored on THAT name, not on the target one never added.
+                addSslHandlerAtPipelineHead(pipeline, SSL_HANDLER, sslHandler);
+                pipeline.addAfter(SSL_HANDLER, HTTP_CLIENT_CODEC, newHttpClientCodec());
             }
-            
-            pipeline.addAfter(TARGET_SSL_HANDLER, HTTP_CLIENT_CODEC, newHttpClientCodec());
 
         } else {
             // For HTTPS proxy to HTTP target, just add HTTP codec
