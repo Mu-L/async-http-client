@@ -582,7 +582,6 @@ public class Realm {
             if (headerLine == null || token == null) {
                 return null;
             }
-            // Look for token= (case-insensitive token match)
             int len = headerLine.length();
             int tokenLen = token.length();
             int i = 0;
@@ -607,12 +606,7 @@ public class Realm {
                         valStart++;
                     }
                     if (valStart < len && headerLine.charAt(valStart) == '"') {
-                        // Quoted value
-                        int valEnd = headerLine.indexOf('"', valStart + 1);
-                        if (valEnd == -1) {
-                            return null;
-                        }
-                        return headerLine.substring(valStart + 1, valEnd);
+                        return unquote(headerLine, valStart);
                     } else {
                         // Unquoted value — terminated by ',' or end-of-string
                         int valEnd = valStart;
@@ -625,9 +619,58 @@ public class Realm {
                         return null;
                     }
                 }
-                i = idx + 1;
+                // Not our token. If its value is a quoted-string, step over the whole thing: its content is
+                // opaque data, and a '=' inside it is not a parameter separator. Without this a value such as
+                // opaque="o, qop=auth-int, z" would let the peer forge any auth-param it likes.
+                int skipFrom = idx + 1;
+                while (skipFrom < len && headerLine.charAt(skipFrom) == ' ') {
+                    skipFrom++;
+                }
+                i = skipFrom < len && headerLine.charAt(skipFrom) == '"'
+                        ? endOfQuotedString(headerLine, skipFrom)
+                        : idx + 1;
             }
             return null;
+        }
+
+        /**
+         * The value of the quoted-string starting at {@code open}, with RFC 7230 Section 3.2.6 quoted-pairs
+         * decoded. The emitting side escapes {@code "} and {@code \} in these values, so reading them back
+         * verbatim would yield a different string than the peer hashed - a realm as ordinary as
+         * {@code DOMAIN\Users} would then fail every digest comparison.
+         */
+        private static @Nullable String unquote(String headerLine, int open) {
+            int len = headerLine.length();
+            StringBuilder sb = new StringBuilder(len - open);
+            for (int i = open + 1; i < len; i++) {
+                char c = headerLine.charAt(i);
+                if (c == '\\' && i + 1 < len) {
+                    sb.append(headerLine.charAt(++i));
+                } else if (c == '"') {
+                    return sb.toString();
+                } else {
+                    sb.append(c);
+                }
+            }
+            // Unterminated quoted-string
+            return null;
+        }
+
+        /**
+         * The index just past the quoted-string starting at {@code open}, honouring quoted-pairs so an
+         * escaped quote does not look like the terminator. Returns the end of the line if unterminated.
+         */
+        private static int endOfQuotedString(String headerLine, int open) {
+            int len = headerLine.length();
+            for (int i = open + 1; i < len; i++) {
+                char c = headerLine.charAt(i);
+                if (c == '\\') {
+                    i++;
+                } else if (c == '"') {
+                    return i + 1;
+                }
+            }
+            return len;
         }
 
         private void newCnonce() {
