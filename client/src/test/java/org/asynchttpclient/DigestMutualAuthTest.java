@@ -467,8 +467,8 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
         }
 
         /**
-         * Server-side rspauth per RFC 7616 §3.5: H(HA1 : nonce : nc : cnonce : qop : H(":" + uri)) using MD5,
-         * mirroring {@code AuthenticatorUtils.computeRspAuth} (HA2 has no method, only the URI).
+         * Server-side rspauth per RFC 7616 §3.5: H(HA1 : nonce : nc : cnonce : qop : H(":" + uri)) using MD5.
+         * A2 carries no method, only the URI — and, under {@code qop=auth}, no entity-body hash either.
          */
         private static String computeRspAuth(Map<String, String> p, String password) throws Exception {
             MessageDigest md = MessageDigest.getInstance("MD5");

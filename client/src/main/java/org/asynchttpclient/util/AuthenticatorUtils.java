@@ -201,18 +201,6 @@ public final class AuthenticatorUtils {
     }
 
     /**
-     * RFC 7616 Section 3.5: Compute rspauth value for mutual authentication.
-     * rspauth = H(HA1 : nonce : nc : cnonce : qop : H(":" uri))
-     * Note: HA2' for rspauth uses empty method prefix.
-     */
-    public static String computeRspAuth(Realm realm) {
-        Uri uri = realm.getUri();
-        String requestUri = uri != null ? computeRealmURI(uri, realm.isUseAbsoluteURI(), realm.isOmitQuery()) : "";
-        return computeRspAuth(realm, realm.getAlgorithm(), realm.getRealmName(), realm.getNonce(),
-                realm.getNc(), realm.getCnonce(), realm.getQop(), requestUri);
-    }
-
-    /**
      * RFC 7616 Section 3.5: the rspauth an honest server must have sent, computed over the Digest
      * credentials this client actually put on the wire.
      * <p>

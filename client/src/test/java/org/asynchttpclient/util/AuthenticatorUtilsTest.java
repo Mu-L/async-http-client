@@ -515,22 +515,6 @@ public class AuthenticatorUtilsTest {
 
     // Phase 7: rspauth computation
     @Test
-    void computeRspAuth_basic() throws Exception {
-        Realm realm = new Realm.Builder("user", "pass")
-                .setScheme(Realm.AuthScheme.DIGEST)
-                .setRealmName("testrealm")
-                .setNonce("testnonce")
-                .setAlgorithm("MD5")
-                .setQop("auth")
-                .setUri(org.asynchttpclient.uri.Uri.create("http://example.com/path"))
-                .build();
-
-        String rspauth = AuthenticatorUtils.computeRspAuth(realm);
-        assertNotNull(rspauth);
-        assertEquals(32, rspauth.length()); // MD5 hex is 32 chars
-    }
-
-    @Test
     void computeExpectedRspAuthUsesTheParametersOnTheWire() {
         // A realm whose uri/nonce/nc/cnonce are all stale or unset — exactly the state the response future
         // carries after a redirect or on a preemptive first request.
@@ -552,8 +536,10 @@ public class AuthenticatorUtilsTest {
         // Independently: rspauth = H(HA1 : nonce : nc : cnonce : qop : H(":" uri)), all from the wire.
         assertEquals(referenceRspAuth("user", "testrealm", "pass", "live-nonce", "00000002",
                 "deadbeefdeadbeef", "auth", "/after"), expected);
-        // ...and nothing like what the stale realm would have produced.
-        assertNotEquals(AuthenticatorUtils.computeRspAuth(realm), expected);
+        // ...and nothing like what the stale realm would have produced: only the nonce and the uri differ
+        // between the two references, so this pins exactly the parameters that must come off the wire.
+        assertNotEquals(referenceRspAuth("user", "testrealm", "pass", "stale-nonce", "00000002",
+                "deadbeefdeadbeef", "auth", "/before-the-redirect"), expected);
     }
 
     @Test
