@@ -1467,11 +1467,38 @@ public final class NettyRequestSender {
         // the old stream (so the stream's imminent channelInactive does not fail the just-replayed request —
         // the same disconnect drainChannelAndOffer performs by swapping the channel attribute) and close it,
         // which fires the closeFuture slot release. The replay opens a fresh stream/connection below.
+        // A replay may target a different origin than the one this future was built for; failover onto a
+        // second host is the documented use of a ResponseFilter. Everything downstream that is keyed off the
+        // future's TARGET has to move with it or it keeps describing the previous origin: the connection
+        // pool partition key, the request ConnectSuccessInterceptor writes into a tunnel, and
+        // NettyConnectListener's decision whether to install an SslHandler at all. The credentials computed
+        // for the previous origin must not follow either. Redirect30xInterceptor already does all of this
+        // for a cross-origin redirect; the replay path never did.
+        Uri previousUri = future.getTargetRequest().getUri();
+        Uri newUri = newRequest.getUri();
+        boolean sameBase = previousUri.isSameBase(newUri);
+        boolean schemeDowngrade = previousUri.isSecured() && !newUri.isSecured();
+        // Sampled while the future still describes the old origin: that is the origin the channel being
+        // drained is connected to, so that is the key it has to be filed under.
+        Object initialPartitionKey = future.getPartitionKey();
+
+        if (!sameBase || schemeDowngrade) {
+            future.setRealm(newRequest.getRealm());
+            future.setProxyRealm(null);
+        }
+        // Proxy first, then target. Both feed the memoized partition key, and setTargetRequest recomputes
+        // it: moving the target while the proxy still names the old route yields a key for the new host on
+        // the old route. Concretely, replaying from a direct origin to one behind a proxy would file the
+        // proxied socket under the direct key for the new host, and the next direct request to that host
+        // would draw it and send its credentials through the proxy.
+        future.setProxyServer(getProxyServer(config, newRequest));
+        future.setTargetRequest(newRequest);
+
         if (channel instanceof Http2StreamChannel) {
             Channels.setDiscard(channel);
             channelManager.closeChannel(channel);
         } else {
-            channelManager.drainChannelAndOffer(channel, future);
+            channelManager.drainChannelAndOffer(channel, future, future.isKeepAlive(), initialPartitionKey);
         }
         sendNextRequest(newRequest, future);
     }

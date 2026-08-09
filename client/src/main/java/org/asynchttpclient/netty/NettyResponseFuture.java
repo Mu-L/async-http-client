@@ -94,7 +94,9 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
     private final long start = unpreciseMillisTime();
     private final ChannelPoolPartitioning connectionPoolPartitioning;
     private final ConnectionSemaphore connectionSemaphore;
-    private final ProxyServer proxyServer;
+    // Not final: a filter replay can retarget this future at a different origin, reached through a
+    // different proxy or none at all. It feeds basePartitionKeyCache, so it has to move with the target.
+    private ProxyServer proxyServer;
     private final int maxRetry;
     private final CompletableFuture<V> future = new CompletableFuture<>();
     public Throwable pendingException;
@@ -146,10 +148,11 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
     private volatile List<InetSocketAddress> roundRobinAddresses;
     private volatile Uri roundRobinBaseUri;
     private volatile ScramContext scramContext;
-    // Base (host/scheme/port) partition key, computed eagerly at construction and recomputed by
-    // setTargetRequest (its only mutator: connectionPoolPartitioning/proxyServer are final and targetRequest
-    // is its only other input). Volatile: setTargetRequest runs on the redirect path while reads happen on
-    // other threads.
+    // Base (host/scheme/port) partition key, computed eagerly at construction and recomputed by both of its
+    // mutators, setTargetRequest and setProxyServer (connectionPoolPartitioning is final; those two are its
+    // only other inputs). Every input must recompute it: a stale key here files a socket under a route the
+    // future no longer takes, which is how a connection through a proxy comes to be offered as a direct one.
+    // Volatile: the mutators run on the redirect and replay paths while reads happen on other threads.
     private volatile Object basePartitionKeyCache;
 
     public NettyResponseFuture(Request originalRequest,
@@ -372,6 +375,17 @@ public final class NettyResponseFuture<V> implements ListenableFuture<V> {
 
     public ProxyServer getProxyServer() {
         return proxyServer;
+    }
+
+    /**
+     * Points this future at the proxy serving its current target, recomputing the partition key so the key
+     * names the route actually in use. Only a replay onto a different origin needs this. Setting it without
+     * recomputing, or recomputing before it is set, files a proxied connection under the direct key for the
+     * new host, and the next direct request to that host then draws a socket that runs through the proxy.
+     */
+    public void setProxyServer(ProxyServer proxyServer) {
+        this.proxyServer = proxyServer;
+        basePartitionKeyCache = computeBasePartitionKey();
     }
 
     public void cancelTimeouts() {
