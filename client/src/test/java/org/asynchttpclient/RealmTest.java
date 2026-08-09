@@ -238,6 +238,90 @@ public class RealmTest {
         assertFalse(clone.isStale());
     }
 
+    /**
+     * A Digest challenge we cannot read must not become a Basic one. Answering it as Basic puts the
+     * password on the wire in the clear, and a server cannot obtain that by offering Basic outright,
+     * because Unauthorized401Interceptor refuses a non-Digest challenge for a Digest realm.
+     * <p>
+     * Deliberately uses a challenge with no nonce at all, rather than one the parser mishandles, so that
+     * this stays a test of the scheme decision alone and cannot be quietly satisfied by the parser.
+     */
+    @Test
+    public void aDigestChallengeWithNoNonceMustNotDowngradeToBasic() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Digest realm=\"protected\"")
+                .build();
+
+        assertEquals(Realm.AuthScheme.DIGEST, realm.getScheme(),
+                "an unreadable Digest challenge must fail, not answer in cleartext");
+    }
+
+    @Test
+    public void aProxyDigestChallengeWithNoNonceMustNotDowngradeToBasic() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseProxyAuthenticateHeader("Digest realm=\"protected\"")
+                .build();
+
+        assertEquals(Realm.AuthScheme.DIGEST, realm.getScheme(),
+                "an unreadable proxy Digest challenge must fail, not answer in cleartext");
+    }
+
+    /**
+     * A genuine Basic challenge is still Basic: the fix above must not turn every challenge into Digest.
+     */
+    @Test
+    public void aBasicChallengeIsStillBasic() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Basic realm=\"protected\"")
+                .build();
+
+        assertEquals(Realm.AuthScheme.BASIC, realm.getScheme());
+    }
+
+    /**
+     * A value ending in an unescaped backslash is malformed per RFC 7230 Section 3.2.6, which requires it
+     * to be sent as {@code \\}. Every conformant reader, this one and Apache HttpComponents alike, sees the
+     * closing quote as escaped and reads on, so the nonce is lost. That is acceptable; answering such a
+     * challenge in cleartext is not. The scheme must stay Digest so no Authorization header is produced.
+     */
+    @Test
+    public void aRealmEndingInAnUnescapedBackslashFailsClosed() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Digest realm=\"C:\\\", nonce=\"abc123\", qop=\"auth\"")
+                .build();
+
+        assertNull(realm.getNonce(), "a malformed challenge is expected to lose the nonce");
+        assertEquals(Realm.AuthScheme.DIGEST, realm.getScheme(),
+                "losing the nonce must fail the exchange, not downgrade it to Basic");
+    }
+
+    /**
+     * The conformant spelling of the realm decodes to one backslash.
+     */
+    @Test
+    public void anEscapedBackslashInARealmDecodesToOne() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Digest realm=\"DOMAIN\\\\Users\", nonce=\"abc123\"")
+                .build();
+
+        assertEquals("DOMAIN\\Users", realm.getRealmName());
+        assertEquals("abc123", realm.getNonce());
+    }
+
+    /**
+     * The unescaped spelling is what real servers tend to send, and it must survive too: a backslash
+     * before an ordinary character is literal, so the U of Users cannot be eaten as an escape.
+     */
+    @Test
+    public void anUnescapedBackslashInARealmIsKept() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Digest realm=\"DOMAIN\\Users\", nonce=\"abc123\"")
+                .build();
+
+        assertEquals("DOMAIN\\Users", realm.getRealmName());
+        assertEquals("abc123", realm.getNonce());
+    }
+
     private String getMd5(String what) throws Exception {
         MessageDigest md = MessageDigest.getInstance("MD5");
         md.update(what.getBytes(StandardCharsets.ISO_8859_1));

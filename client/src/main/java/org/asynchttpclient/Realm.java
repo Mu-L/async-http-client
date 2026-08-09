@@ -515,7 +515,7 @@ public class Realm {
             setRealmName(matchParam(headerLine, "realm"))
                     .setNonce(matchParam(headerLine, "nonce"))
                     .setOpaque(matchParam(headerLine, "opaque"))
-                    .setScheme(isNonEmpty(nonce) ? AuthScheme.DIGEST : AuthScheme.BASIC);
+                    .setScheme(challengedScheme(headerLine, nonce));
             String algorithm = matchParam(headerLine, "algorithm");
             String cs = matchParam(headerLine, "charset");
             if ("UTF-8".equalsIgnoreCase(cs)) {
@@ -545,7 +545,7 @@ public class Realm {
             setRealmName(matchParam(headerLine, "realm"))
                     .setNonce(matchParam(headerLine, "nonce"))
                     .setOpaque(matchParam(headerLine, "opaque"))
-                    .setScheme(isNonEmpty(nonce) ? AuthScheme.DIGEST : AuthScheme.BASIC);
+                    .setScheme(challengedScheme(headerLine, nonce));
             String algorithm = matchParam(headerLine, "algorithm");
             if (isNonEmpty(algorithm)) {
                 setAlgorithm(algorithm);
@@ -570,6 +570,31 @@ public class Realm {
             this.userhash = "true".equalsIgnoreCase(userhashStr);
 
             return this;
+        }
+
+        /**
+         * The scheme a parsed challenge authenticates with.
+         * <p>
+         * A challenge that announces itself as Digest stays Digest even when its parameters do not parse.
+         * Deciding this from the presence of a nonce instead meant any challenge we failed to read became a
+         * Basic one, and answering it put the password on the wire in the clear - the single thing Digest
+         * exists to prevent. A hostile server cannot obtain that by asking for Basic directly, because a
+         * Digest realm refuses a challenge that is not Digest, so a parser slip must not hand over what the
+         * honest path withholds. A Digest challenge with no nonce produces no Authorization header at all,
+         * so the request fails rather than leaking.
+         */
+        private static AuthScheme challengedScheme(@Nullable String headerLine, @Nullable String nonce) {
+            if (isNonEmpty(nonce)) {
+                return AuthScheme.DIGEST;
+            }
+            if (headerLine == null) {
+                return AuthScheme.BASIC;
+            }
+            int start = 0;
+            while (start < headerLine.length() && headerLine.charAt(start) == ' ') {
+                start++;
+            }
+            return headerLine.regionMatches(true, start, "Digest", 0, 6) ? AuthScheme.DIGEST : AuthScheme.BASIC;
         }
 
         /**
@@ -638,6 +663,11 @@ public class Realm {
          * decoded. The emitting side escapes {@code "} and {@code \} in these values, so reading them back
          * verbatim would yield a different string than the peer hashed - a realm as ordinary as
          * {@code DOMAIN\Users} would then fail every digest comparison.
+         * <p>
+         * A backslash before any other character is kept as written, which is what lets the unescaped
+         * spelling of that same realm survive. The rule is adapted from the quoted-content handling in
+         * Apache HttpComponents Core ({@code org.apache.hc.core5.util.Tokenizer}), Apache License 2.0,
+         * reimplemented here against this class's index-based scanning rather than a cursor.
          */
         private static @Nullable String unquote(String headerLine, int open) {
             int len = headerLine.length();
@@ -645,7 +675,16 @@ public class Realm {
             for (int i = open + 1; i < len; i++) {
                 char c = headerLine.charAt(i);
                 if (c == '\\' && i + 1 < len) {
-                    sb.append(headerLine.charAt(++i));
+                    char escaped = headerLine.charAt(i + 1);
+                    if (escaped == '"' || escaped == '\\') {
+                        sb.append(escaped);
+                    } else {
+                        // Only those two are ever escaped on the way out, so a backslash before anything
+                        // else was meant literally: an unescaped realm such as DOMAIN\Users is common
+                        // enough that consuming the U would corrupt the value and fail every comparison.
+                        sb.append(c).append(escaped);
+                    }
+                    i++;
                 } else if (c == '"') {
                     return sb.toString();
                 } else {
@@ -664,8 +703,11 @@ public class Realm {
             int len = headerLine.length();
             for (int i = open + 1; i < len; i++) {
                 char c = headerLine.charAt(i);
-                if (c == '\\') {
-                    i++;
+                if (c == '\\' && i + 1 < len) {
+                    char escaped = headerLine.charAt(i + 1);
+                    if (escaped == '"' || escaped == '\\') {
+                        i++;
+                    }
                 } else if (c == '"') {
                     return i + 1;
                 }
