@@ -28,6 +28,7 @@ import org.asynchttpclient.netty.NettyResponseFuture;
 import org.asynchttpclient.netty.OnLastHttpContentCallback;
 import org.asynchttpclient.netty.channel.ChannelManager;
 import org.asynchttpclient.netty.channel.Channels;
+import org.asynchttpclient.netty.channel.PrincipalScopedPartitionKey;
 import org.asynchttpclient.netty.future.StackTraceInspector;
 import org.asynchttpclient.netty.handler.intercept.Interceptors;
 import org.asynchttpclient.netty.request.NettyRequestSender;
@@ -200,7 +201,10 @@ public abstract class AsyncHttpClientHandler extends ChannelInboundHandlerAdapte
         if (close) {
             channelManager.closeChannel(channel);
         } else {
-            channelManager.tryToOfferChannelToPool(channel, future, true, future.getPartitionKey());
+            // Same scoping as the pool poll: a connection authenticated by NTLM or Negotiate is filed
+            // under the identity that authenticated it, so no other principal can draw it.
+            channelManager.tryToOfferChannelToPool(channel, future, true,
+                    PrincipalScopedPartitionKey.scope(future.getPartitionKey(), future.getRealm()));
         }
 
         try {

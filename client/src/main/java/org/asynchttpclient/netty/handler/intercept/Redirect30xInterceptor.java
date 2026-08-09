@@ -30,6 +30,7 @@ import org.asynchttpclient.cookie.CookieStore;
 import org.asynchttpclient.handler.MaxRedirectException;
 import org.asynchttpclient.netty.NettyResponseFuture;
 import org.asynchttpclient.netty.channel.ChannelManager;
+import org.asynchttpclient.netty.channel.PrincipalScopedPartitionKey;
 import org.asynchttpclient.netty.request.NettyRequestSender;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import org.asynchttpclient.uri.Uri;
@@ -167,7 +168,11 @@ public class Redirect30xInterceptor {
                 // in case of a redirect from HTTP to HTTPS, future
                 // attributes might change
                 final boolean initialConnectionKeepAlive = future.isKeepAlive();
-                final Object initialPartitionKey = future.getPartitionKey();
+                // Scoped like every other offer: an NTLM or Negotiate connection must stay with the
+                // identity that authenticated it, and a same-host redirect during NTLM is the ordinary
+                // case rather than an exotic one.
+                final Object initialPartitionKey = PrincipalScopedPartitionKey.scope(
+                        future.getPartitionKey(), future.getRealm());
 
                 CookieStore cookieStore = config.getCookieStore();
                 if (cookieStore != null) {

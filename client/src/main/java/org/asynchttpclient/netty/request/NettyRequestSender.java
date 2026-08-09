@@ -63,6 +63,7 @@ import org.asynchttpclient.netty.OnLastHttpContentCallback;
 import org.asynchttpclient.netty.SimpleFutureListener;
 import org.asynchttpclient.netty.channel.ChannelManager;
 import org.asynchttpclient.netty.channel.ChannelState;
+import org.asynchttpclient.netty.channel.PrincipalScopedPartitionKey;
 import org.asynchttpclient.netty.channel.Channels;
 import org.asynchttpclient.netty.channel.ConnectionSemaphore;
 import org.asynchttpclient.netty.channel.Http2ConnectionState;
@@ -1380,6 +1381,19 @@ public final class NettyRequestSender {
         return false;
     }
 
+    /**
+     * The realm whose identity a pooled connection is scoped by. Resolved exactly as
+     * newNettyRequestAndResponseFuture resolves it, so the poll and the offer agree. The future is null on
+     * a request's first attempt, which is why this cannot simply read it off the future.
+     */
+    private Realm pooledIdentity(NettyResponseFuture<?> future, Request request) {
+        if (future != null) {
+            return future.getRealm();
+        }
+        Realm realm = request.getRealm();
+        return realm != null ? realm : config.getRealm();
+    }
+
     private Channel pollPooledChannel(NettyResponseFuture<?> future, Request request, ProxyServer proxy, AsyncHandler<?> asyncHandler) {
         try {
             asyncHandler.onConnectionPoolAttempt();
@@ -1407,7 +1421,8 @@ public final class NettyRequestSender {
                     return h2Channel;
                 }
             }
-            Channel channel = channelManager.poll(override);
+            Channel channel = channelManager.poll(
+                    PrincipalScopedPartitionKey.scope(override, pooledIdentity(future, request)));
             if (channel != null && LOGGER.isDebugEnabled()) {
                 LOGGER.debug("Using pooled Channel '{}' for '{}' to '{}'", channel, request.getMethod(), uri);
             }
@@ -1436,7 +1451,14 @@ public final class NettyRequestSender {
             }
         }
 
-        final Channel channel = channelManager.poll(partitionKey);
+        // Scope the HTTP/1.1 pool lookup by the authenticated identity. NTLM and Negotiate authenticate the
+        // socket, not the request, so a connection one principal completed the handshake on must not be
+        // handed to another: the server would serve the second request as the first principal, and nothing
+        // on the wire would show it. Deliberately not applied to the HTTP/2 registry poll above, nor to the
+        // connection semaphore, which stay keyed per host. A disagreement between this and the offer side
+        // costs a pool miss, never a wrong reuse.
+        final Channel channel = channelManager.poll(
+                PrincipalScopedPartitionKey.scope(partitionKey, pooledIdentity(future, request)));
 
         if (channel != null && LOGGER.isDebugEnabled()) {
             LOGGER.debug("Using pooled Channel '{}' for '{}' to '{}'", channel, request.getMethod(), uri);
@@ -1480,7 +1502,8 @@ public final class NettyRequestSender {
         boolean schemeDowngrade = previousUri.isSecured() && !newUri.isSecured();
         // Sampled while the future still describes the old origin: that is the origin the channel being
         // drained is connected to, so that is the key it has to be filed under.
-        Object initialPartitionKey = future.getPartitionKey();
+        Object initialPartitionKey = PrincipalScopedPartitionKey.scope(
+                future.getPartitionKey(), future.getRealm());
 
         if (!sameBase || schemeDowngrade) {
             future.setRealm(newRequest.getRealm());
