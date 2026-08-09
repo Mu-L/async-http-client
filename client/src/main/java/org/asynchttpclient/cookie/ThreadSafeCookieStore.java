@@ -201,6 +201,19 @@ public final class ThreadSafeCookieStore implements CookieStore {
             return;
         }
 
+        // rfc6265#section-5.3 step 5: a Domain naming a public suffix must not be honoured. Step 6 above
+        // only asks whether the request host sits under the Domain, which evil.co.uk setting Domain=co.uk
+        // satisfies, so on its own it still lets one site plant a cookie every other site under that
+        // registry receives. Label counting cannot stand in: co.uk has a dot like any other domain.
+        //
+        // The step also says that when the Domain equals the request host the cookie is kept, as a
+        // host-only cookie, rather than discarded. That case is not an attack and dropping it would break
+        // ordinary single-label hosts: dev, app, box, cloud and a dozen more are ICANN suffixes as well as
+        // the short names Docker Compose and Kubernetes hand out.
+        if (!hostOnly && PublicSuffixList.isPublicSuffix(keyDomain) && !keyDomain.equals(requestDomain)) {
+            return;
+        }
+
         String keyPath = cookiePath(cookie.path(), requestPath);
         CookieKey key = new CookieKey(cookie.name().toLowerCase(), keyPath);
 
