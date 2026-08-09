@@ -19,6 +19,8 @@ package org.asynchttpclient;
 import org.asynchttpclient.uri.Uri;
 import org.asynchttpclient.util.AuthenticatorUtils;
 import org.asynchttpclient.util.StringBuilderPool;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.asynchttpclient.util.StringUtils;
 import org.jetbrains.annotations.Nullable;
 
@@ -302,6 +304,8 @@ public class Realm {
      */
     public static class Builder {
 
+        private static final Logger LOGGER = LoggerFactory.getLogger(Builder.class);
+
         // cnonce must be unpredictable (RFC 7616 section 3.3), like the NTLM and SCRAM nonces
         private static final ThreadLocal<SecureRandom> CNONCE_RANDOM = ThreadLocal.withInitial(SecureRandom::new);
 
@@ -506,6 +510,19 @@ public class Realm {
             // cannot be derived there and mutual authentication is skipped for the whole exchange. A peer
             // that chooses the challenge could therefore switch mutual authentication off simply by offering
             // auth-int on its own. Declining to negotiate a mode we cannot verify keeps that decision ours.
+            //
+            // Returning no qop is not free: the exchange falls back to the RFC 2069 digest, which carries no
+            // cnonce and no nonce count and so has weaker replay protection than the auth-int it replaces.
+            // That is still preferable to authenticating with no mutual check at all, but it is a downgrade
+            // and the caller deserves to know it happened.
+            for (String rawServerSupportedQop : serverSupportedQops) {
+                if ("auth-int".equalsIgnoreCase(rawServerSupportedQop)) {
+                    LOGGER.warn("Server offered qop=\"auth-int\" only. Its rspauth cannot be verified before the "
+                            + "response body is read, so it is not negotiated and this exchange falls back to the "
+                            + "RFC 2069 digest, which has weaker replay protection.");
+                    break;
+                }
+            }
             return null;
         }
 
