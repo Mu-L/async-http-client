@@ -495,19 +495,17 @@ public class Realm {
                 serverSupportedQops[i] = rawServerSupportedQops[i].trim();
             }
 
-            // prefer auth over auth-int
             for (String rawServerSupportedQop : serverSupportedQops) {
                 if ("auth".equals(rawServerSupportedQop)) {
                     return rawServerSupportedQop;
                 }
             }
 
-            for (String rawServerSupportedQop : serverSupportedQops) {
-                if ("auth-int".equals(rawServerSupportedQop)) {
-                    return rawServerSupportedQop;
-                }
-            }
-
+            // auth-int is deliberately not selected. Its rspauth signs the response entity-body, which has
+            // not been read when the Authentication-Info header is processed, so the value the server signed
+            // cannot be derived there and mutual authentication is skipped for the whole exchange. A peer
+            // that chooses the challenge could therefore switch mutual authentication off simply by offering
+            // auth-int on its own. Declining to negotiate a mode we cannot verify keeps that decision ours.
             return null;
         }
 

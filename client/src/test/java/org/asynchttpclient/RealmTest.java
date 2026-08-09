@@ -322,6 +322,31 @@ public class RealmTest {
         assertEquals("abc123", realm.getNonce());
     }
 
+    /**
+     * A peer that offers only auth-int must not get auth-int negotiated. The rspauth of an auth-int
+     * exchange signs the response entity-body, which has not been read when Authentication-Info is
+     * processed, so the expected value cannot be derived and mutual authentication ends up skipped for the
+     * whole exchange. Offering auth-int alone would therefore let the peer choosing the challenge switch
+     * mutual authentication off. Declining to negotiate it keeps that decision on our side.
+     */
+    @Test
+    public void aQopOfAuthIntAloneIsNotNegotiated() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Digest realm=\"protected\", nonce=\"N\", qop=\"auth-int\"")
+                .build();
+
+        assertNull(realm.getQop(), "auth-int must not be negotiated: its rspauth cannot be verified");
+    }
+
+    @Test
+    public void authIsStillPreferredWhenBothAreOffered() {
+        Realm realm = new Realm.Builder("user", "pass")
+                .parseWWWAuthenticateHeader("Digest realm=\"protected\", nonce=\"N\", qop=\"auth,auth-int\"")
+                .build();
+
+        assertEquals("auth", realm.getQop());
+    }
+
     private String getMd5(String what) throws Exception {
         MessageDigest md = MessageDigest.getInstance("MD5");
         md.update(what.getBytes(StandardCharsets.ISO_8859_1));

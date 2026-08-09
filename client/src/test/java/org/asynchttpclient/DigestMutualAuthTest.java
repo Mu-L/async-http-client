@@ -150,17 +150,21 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
     }
 
     /**
-     * RFC 7616 §3.5 defines {@code A2} for {@code qop=auth-int} as {@code ":" request-uri ":" H(entity-body)}
-     * over the <em>response</em> entity-body. That body has not been received when the {@code
-     * Authentication-Info} header is processed, so the expected value simply cannot be derived there. The
-     * client must therefore fall back to warn-and-deliver for auth-int instead of enforcing the auth-only
-     * formula, which would abort against a perfectly conformant server.
+     * RFC 7616 Section 3.5 defines {@code A2} for {@code qop=auth-int} as {@code ":" request-uri ":"
+     * H(entity-body)} over the <em>response</em> entity-body. That body has not arrived when the {@code
+     * Authentication-Info} header is processed, so the expected rspauth cannot be derived there at all.
      * <p>
-     * The server arm here computes rspauth <em>from the RFC</em> rather than by mirroring the client, which is
-     * what makes this test able to catch the mismatch at all.
+     * The client used to negotiate auth-int anyway and then report "cannot verify", which delivered the
+     * response with mutual authentication silently skipped for the whole exchange. Since the peer chooses
+     * the challenge, offering {@code qop="auth-int"} on its own was a one-word way to switch mutual
+     * authentication off. The client now declines to negotiate a mode whose rspauth it cannot check.
+     * <p>
+     * Interoperability cost, deliberately accepted: a server offering auth-int and nothing else can no
+     * longer be authenticated against. {@code auth,auth-int} is unaffected, because auth is preferred and
+     * its rspauth is verified.
      */
     @RepeatedIfExceptionsTest(repeats = 5)
-    public void authIntRspAuthIsNotEnforcedAgainstAConformantServer() throws Exception {
+    public void anAuthIntOnlyChallengeIsNotAnsweredWithAuthInt() throws Exception {
         restartServer(new AuthIntRspAuthHandler());
 
         try (AsyncHttpClient client = asyncHttpClient()) {
@@ -169,12 +173,12 @@ public class DigestMutualAuthTest extends AbstractBasicTest {
                     .execute();
             Response resp = f.get(60, TimeUnit.SECONDS);
             assertNotNull(resp);
-            assertEquals(HttpServletResponse.SC_OK, resp.getStatusCode());
-            assertEquals(AuthIntRspAuthHandler.BODY, resp.getResponseBody());
-            // The exchange really did negotiate auth-int; the client did not quietly fall back to auth.
-            assertNotNull(resp.getHeader("X-Auth"));
-            assertTrue(resp.getHeader("X-Auth").contains("qop=auth-int"),
-                    "expected the request to have been sent with qop=auth-int but got: " + resp.getHeader("X-Auth"));
+            // The server only accepts qop=auth-int, so declining it means the exchange is not authenticated.
+            assertEquals(HttpServletResponse.SC_UNAUTHORIZED, resp.getStatusCode(),
+                    "an auth-int-only challenge must not be answered, since its rspauth cannot be verified");
+            String sent = resp.getHeader("X-Auth");
+            assertTrue(sent == null || !sent.contains("qop=auth-int"),
+                    "the client must not negotiate auth-int: " + sent);
         }
     }
 
