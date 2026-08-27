@@ -109,6 +109,10 @@ public interface AsyncHttpClientConfig {
 
     /**
      * Return the maximum time an {@link AsyncHttpClient} waits until the response is completed.
+     * <p>
+     * By default this bounds each attempt within an exchange rather than the exchange as a whole: a redirect, a
+     * retry and an auth replay each start it again, so a chain of n hops may run for n times this value. Set
+     * {@link #isUseAbsoluteRequestDeadline()} to bound the exchange instead.
      *
      * @return the maximum time an {@link AsyncHttpClient} waits until the response is completed.
      */
@@ -139,6 +143,30 @@ public interface AsyncHttpClientConfig {
      * @return {@code true} to arm request and read timeouts on an event loop
      */
     default boolean isUseEventLoopTimeouts() {
+        return false;
+    }
+
+    /**
+     * Whether {@link #getRequestTimeout()} is a deadline for the whole exchange rather than for each attempt
+     * within it.
+     * <p>
+     * A redirect, a retry and an auth replay all continue the same exchange on the same response future, but
+     * each builds its own timeout state. Anchoring the deadline on that state gives every hop a fresh budget,
+     * which is why a five-redirect chain can legitimately take six times the configured timeout today. Enabling
+     * this anchors it on when the exchange was submitted instead, so a later hop gets whatever is left and the
+     * caller's total wait is bounded by the one value.
+     * <p>
+     * Off by default because turning it on shortens exchanges that rely on the per-attempt behaviour. A caller
+     * working to an end-to-end budget wants it on; {@link Request#getUseAbsoluteRequestDeadline()} sets it for a
+     * single request.
+     * <p>
+     * As with every option on this interface, the {@code org.asynchttpclient.useAbsoluteRequestDeadline}
+     * property is read by {@link DefaultAsyncHttpClientConfig.Builder}, not here: an implementation of this
+     * interface that does not override this method gets {@code false} whatever the property says.
+     *
+     * @return {@code true} to treat the request timeout as a deadline for the whole exchange
+     */
+    default boolean isUseAbsoluteRequestDeadline() {
         return false;
     }
 

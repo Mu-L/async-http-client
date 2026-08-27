@@ -63,6 +63,7 @@ import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultEn
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultEnabledProtocols;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultExpiredCookieEvictionDelay;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultFailedIpCooldownEnabled;
+import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultUseAbsoluteRequestDeadline;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultFailedIpCooldownPeriod;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultFilterInsecureCipherSuites;
 import static org.asynchttpclient.config.AsyncHttpClientConfigDefaults.defaultFollowRedirect;
@@ -139,6 +140,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
     private final int maxRequestRetry;
     private final LoadBalance loadBalance;
     private final boolean failedIpCooldownEnabled;
+    private final boolean useAbsoluteRequestDeadline;
     private final Duration failedIpCooldownPeriod;
     private final boolean disableUrlEncodingForBoundRequests;
     private final boolean useLaxCookieEncoder;
@@ -245,6 +247,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
                                          int maxRequestRetry,
                                          LoadBalance loadBalance,
                                          boolean failedIpCooldownEnabled,
+                                         boolean useAbsoluteRequestDeadline,
                                          Duration failedIpCooldownPeriod,
                                          boolean disableUrlEncodingForBoundRequests,
                                          boolean useLaxCookieEncoder,
@@ -351,6 +354,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
         this.maxRequestRetry = maxRequestRetry;
         this.loadBalance = loadBalance;
         this.failedIpCooldownEnabled = failedIpCooldownEnabled;
+        this.useAbsoluteRequestDeadline = useAbsoluteRequestDeadline;
         this.failedIpCooldownPeriod = failedIpCooldownPeriod;
         this.disableUrlEncodingForBoundRequests = disableUrlEncodingForBoundRequests;
         this.useLaxCookieEncoder = useLaxCookieEncoder;
@@ -520,6 +524,11 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
     @Override
     public boolean isFailedIpCooldownEnabled() {
         return failedIpCooldownEnabled;
+    }
+
+    @Override
+    public boolean isUseAbsoluteRequestDeadline() {
+        return useAbsoluteRequestDeadline;
     }
 
     @Override
@@ -946,6 +955,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
         private int maxRequestRetry = defaultMaxRequestRetry();
         private LoadBalance loadBalance = defaultLoadBalance();
         private boolean failedIpCooldownEnabled = defaultFailedIpCooldownEnabled();
+        private boolean useAbsoluteRequestDeadline = defaultUseAbsoluteRequestDeadline();
         private Duration failedIpCooldownPeriod = defaultFailedIpCooldownPeriod();
         private boolean disableUrlEncodingForBoundRequests = defaultDisableUrlEncodingForBoundRequests();
         private boolean useLaxCookieEncoder = defaultUseLaxCookieEncoder();
@@ -1055,6 +1065,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
             maxRequestRetry = config.getMaxRequestRetry();
             loadBalance = config.getLoadBalance();
             failedIpCooldownEnabled = config.isFailedIpCooldownEnabled();
+            useAbsoluteRequestDeadline = config.isUseAbsoluteRequestDeadline();
             failedIpCooldownPeriod = config.getFailedIpCooldownPeriod();
             disableUrlEncodingForBoundRequests = config.isDisableUrlEncodingForBoundRequests();
             useLaxCookieEncoder = config.isUseLaxCookieEncoder();
@@ -1252,6 +1263,17 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
          */
         public Builder setFailedIpCooldownEnabled(boolean failedIpCooldownEnabled) {
             this.failedIpCooldownEnabled = failedIpCooldownEnabled;
+            return this;
+        }
+
+        /**
+         * @param useAbsoluteRequestDeadline whether the request timeout is a deadline for the whole exchange
+         *                                   rather than for each attempt within it; see
+         *                                   {@link AsyncHttpClientConfig#isUseAbsoluteRequestDeadline()}
+         * @return this
+         */
+        public Builder setUseAbsoluteRequestDeadline(boolean useAbsoluteRequestDeadline) {
+            this.useAbsoluteRequestDeadline = useAbsoluteRequestDeadline;
             return this;
         }
 
@@ -1773,6 +1795,7 @@ public class DefaultAsyncHttpClientConfig implements AsyncHttpClientConfig {
                     maxRequestRetry,
                     loadBalance,
                     failedIpCooldownEnabled,
+                    useAbsoluteRequestDeadline,
                     failedIpCooldownPeriod,
                     disableUrlEncodingForBoundRequests,
                     useLaxCookieEncoder,

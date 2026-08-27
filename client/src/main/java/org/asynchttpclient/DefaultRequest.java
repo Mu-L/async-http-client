@@ -63,6 +63,7 @@ public class DefaultRequest implements Request {
     private final @Nullable Realm realm;
     private final @Nullable File file;
     private final @Nullable Boolean followRedirect;
+    private final @Nullable Boolean useAbsoluteRequestDeadline;
     private final Duration requestTimeout;
     private final Duration readTimeout;
     private final long rangeOffset;
@@ -99,6 +100,48 @@ public class DefaultRequest implements Request {
                           @Nullable Charset charset,
                           ChannelPoolPartitioning channelPoolPartitioning,
                           NameResolver<InetAddress> nameResolver) {
+        this(method, uri, address, localAddress, headers, cookies, byteData, compositeByteData, stringData,
+                byteBufferData, byteBufData, streamData, bodyGenerator, formParams, bodyParts, virtualHost,
+                proxyServer, realm, file, followRedirect, requestTimeout, readTimeout, rangeOffset, charset,
+                channelPoolPartitioning, nameResolver, null);
+    }
+
+    /**
+     * The full set of fields a request carries, called only by {@link RequestBuilderBase#build()}. Not public and
+     * not part of the API: the constructor above is what outside callers compile against, so this one is free to
+     * take another field without pinning a signature or asking the next reader to keep two parameter lists of
+     * reference types in step by eye.
+     *
+     * @param useAbsoluteRequestDeadline whether {@code requestTimeout} bounds the whole exchange rather than
+     *                                   each attempt within it, or null to defer to the client config
+     */
+    DefaultRequest(String method,
+                   Uri uri,
+                   @Nullable InetAddress address,
+                   @Nullable InetAddress localAddress,
+                   HttpHeaders headers,
+                   List<Cookie> cookies,
+                   byte @Nullable [] byteData,
+                   @Nullable List<byte[]> compositeByteData,
+                   @Nullable String stringData,
+                   @Nullable ByteBuffer byteBufferData,
+                   @Nullable ByteBuf byteBufData,
+                   @Nullable InputStream streamData,
+                   @Nullable BodyGenerator bodyGenerator,
+                   List<Param> formParams,
+                   List<Part> bodyParts,
+                   @Nullable String virtualHost,
+                   @Nullable ProxyServer proxyServer,
+                   @Nullable Realm realm,
+                   @Nullable File file,
+                   @Nullable Boolean followRedirect,
+                   @Nullable Duration requestTimeout,
+                   @Nullable Duration readTimeout,
+                   long rangeOffset,
+                   @Nullable Charset charset,
+                   ChannelPoolPartitioning channelPoolPartitioning,
+                   NameResolver<InetAddress> nameResolver,
+                   @Nullable Boolean useAbsoluteRequestDeadline) {
         this.method = method;
         this.uri = uri;
         this.address = address;
@@ -119,6 +162,7 @@ public class DefaultRequest implements Request {
         this.realm = realm;
         this.file = file;
         this.followRedirect = followRedirect;
+        this.useAbsoluteRequestDeadline = useAbsoluteRequestDeadline;
         this.requestTimeout = requestTimeout == null ? Duration.ZERO : requestTimeout;
         this.readTimeout = readTimeout == null ? Duration.ZERO : readTimeout;
         this.rangeOffset = rangeOffset;
@@ -230,6 +274,11 @@ public class DefaultRequest implements Request {
     @Override
     public @Nullable Boolean getFollowRedirect() {
         return followRedirect;
+    }
+
+    @Override
+    public @Nullable Boolean getUseAbsoluteRequestDeadline() {
+        return useAbsoluteRequestDeadline;
     }
 
     @Override

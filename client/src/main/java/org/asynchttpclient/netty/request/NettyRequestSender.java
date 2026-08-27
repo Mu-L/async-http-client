@@ -81,6 +81,7 @@ import org.asynchttpclient.proxy.ProxyServer;
 import org.asynchttpclient.proxy.ProxyType;
 import org.asynchttpclient.resolver.RequestHostnameResolver;
 import org.asynchttpclient.uri.Uri;
+import org.asynchttpclient.util.StringBuilderPool;
 import org.asynchttpclient.ws.WebSocketUpgradeHandler;
 import org.jetbrains.annotations.Nullable;
 
@@ -98,9 +99,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
+import static org.asynchttpclient.util.DateUtils.unpreciseMillisTime;
 import static io.netty.handler.codec.http.HttpHeaderNames.EXPECT;
 import static java.util.Collections.singletonList;
 import static java.util.Objects.requireNonNull;
@@ -111,6 +114,7 @@ import static org.asynchttpclient.util.HttpConstants.Methods.GET;
 import static org.asynchttpclient.util.HttpUtils.GZIP_DEFLATE;
 import static org.asynchttpclient.util.HttpUtils.GZIP_DEFLATE_HPACK;
 import static org.asynchttpclient.util.HttpUtils.hostHeader;
+import static org.asynchttpclient.util.HttpUtils.useAbsoluteRequestDeadline;
 import static org.asynchttpclient.util.MiscUtils.getCause;
 import static org.asynchttpclient.util.ProxyUtils.getProxyServer;
 
@@ -408,9 +412,10 @@ public final class NettyRequestSender {
         future.attachChannel(channel, false);
 
         SocketAddress channelRemoteAddress = channel.remoteAddress();
-        if (channelRemoteAddress != null) {
+        if (channelRemoteAddress != null
+                && !scheduleRequestTimeout(future, (InetSocketAddress) channelRemoteAddress, channel)) {
             // otherwise, bad luck, the channel was closed, see bellow
-            scheduleRequestTimeout(future, (InetSocketAddress) channelRemoteAddress, channel);
+            return future;
         }
 
         if (LOGGER.isDebugEnabled()) {
@@ -521,7 +526,9 @@ public final class NettyRequestSender {
                 abort(null, future, new UnknownHostException("No addresses resolved for " + request.getUri().getHost()));
                 return future;
             }
-            scheduleRequestTimeout(future, roundRobinAddresses.get(0));
+            if (!scheduleRequestTimeout(future, roundRobinAddresses.get(0))) {
+                return future;
+            }
             connectWithAddresses(request, proxy, future, asyncHandler, roundRobinAddresses);
             return future;
         }
@@ -591,16 +598,16 @@ public final class NettyRequestSender {
         if (proxy != null && !proxy.isIgnoredForHost(uri.getHost()) && proxy.getProxyType().isHttp()) {
             int port = ProxyType.HTTPS.equals(proxy.getProxyType()) || uri.isSecured() ? proxy.getSecuredPort() : proxy.getPort();
             InetSocketAddress unresolvedRemoteAddress = InetSocketAddress.createUnresolved(proxy.getHost(), port);
-            if (scheduleTimeout) {
-                scheduleRequestTimeout(future, unresolvedRemoteAddress);
+            if (scheduleTimeout && !scheduleRequestTimeout(future, unresolvedRemoteAddress)) {
+                return abortedResolution(future);
             }
             return resolveHostname(request, unresolvedRemoteAddress, asyncHandler);
         } else {
             int port = uri.getExplicitPort();
 
             InetSocketAddress unresolvedRemoteAddress = InetSocketAddress.createUnresolved(uri.getHost(), port);
-            if (scheduleTimeout) {
-                scheduleRequestTimeout(future, unresolvedRemoteAddress);
+            if (scheduleTimeout && !scheduleRequestTimeout(future, unresolvedRemoteAddress)) {
+                return abortedResolution(future);
             }
 
             if (request.getAddress() != null) {
@@ -631,6 +638,8 @@ public final class NettyRequestSender {
                 request.getChannelPoolPartitioning(),
                 connectionSemaphore,
                 proxyServer);
+
+        future.setUseAbsoluteRequestDeadline(useAbsoluteRequestDeadline(config, request));
 
         String expectHeader = request.getHeaders().get(EXPECT);
         if (HttpHeaderValues.CONTINUE.contentEqualsIgnoreCase(expectHeader)) {
@@ -1081,26 +1090,40 @@ public final class NettyRequestSender {
         ((TransferCompletionHandler) handler).headers(h);
     }
 
-    private void scheduleRequestTimeout(NettyResponseFuture<?> nettyResponseFuture,
-                                        InetSocketAddress originalRemoteAddress) {
-        scheduleRequestTimeout(nettyResponseFuture, originalRemoteAddress, null);
+    private boolean scheduleRequestTimeout(NettyResponseFuture<?> nettyResponseFuture,
+                                           InetSocketAddress originalRemoteAddress) {
+        return scheduleRequestTimeout(nettyResponseFuture, originalRemoteAddress, null);
     }
 
     /**
+     * Arms the timeouts for the attempt about to be made, unless the exchange has no time left to make it in.
+     * Every attempt passes through here, whether it is the first or a redirect, an auth replay or a retry, and
+     * it is the last point before the request is written -- so it is where a deadline is worth one more look.
+     * Arming at zero instead would abort the attempt, but only after a connection permit had been taken, a
+     * connection taken and the request written: a 307 would put its body on the redirect target and then hand
+     * the caller a TimeoutException that reads as though nothing had been sent.
+     *
      * @param channel the channel the exchange will run on when it is already known, so the timeout can be armed
      *                on the loop that owns it. Null on the connect path: the timeout is armed before the channel
      *                exists, deliberately, so that it also bounds address resolution and the connect itself, and
      *                {@code TimeoutsHolder#rehomeOn} moves it onto the loop once there is one.
+     * @return whether the attempt may go ahead. When {@code false} the exchange has already been aborted.
      */
-    private void scheduleRequestTimeout(NettyResponseFuture<?> nettyResponseFuture,
-                                        InetSocketAddress originalRemoteAddress,
-                                        @Nullable Channel channel) {
+    private boolean scheduleRequestTimeout(NettyResponseFuture<?> nettyResponseFuture,
+                                           InetSocketAddress originalRemoteAddress,
+                                           @Nullable Channel channel) {
+        if (TimeoutsHolder.remainingBudget(config, nettyResponseFuture) <= 0L) {
+            abort(nettyResponseFuture.channel(), nettyResponseFuture,
+                    new TimeoutException(deadlinePassedMessage(nettyResponseFuture.getTargetRequest(), nettyResponseFuture)));
+            return false;
+        }
         nettyResponseFuture.touch();
         TimeoutsHolder timeoutsHolder = new TimeoutsHolder(nettyTimer, timeoutExecutor(channel), nettyResponseFuture,
                 this, config, originalRemoteAddress);
         // Arms the timeout as a part of installing the holder, which is why the pooled path attaches the
         // channel first: an expiry that lands immediately reaches the channel only through the future.
         nettyResponseFuture.setTimeoutsHolder(timeoutsHolder);
+        return true;
     }
 
     /**
@@ -1211,6 +1234,24 @@ public final class NettyRequestSender {
 
     public <T> void sendNextRequest(final Request request, final NettyResponseFuture<T> future) {
         sendRequest(request, future.getAsyncHandler(), future);
+    }
+
+    /**
+     * A resolution that will not be attempted, for an attempt the exchange has no time left to make. The
+     * exchange is aborted before this is returned, so the failure carried here only stops the listener from
+     * carrying on with a connect.
+     */
+    private static <T> Future<List<InetSocketAddress>> abortedResolution(NettyResponseFuture<T> future) {
+        return ImmediateEventExecutor.INSTANCE.newFailedFuture(
+                new TimeoutException(deadlinePassedMessage(future.getTargetRequest(), future)));
+    }
+
+    private static String deadlinePassedMessage(Request request, NettyResponseFuture<?> future) {
+        return StringBuilderPool.DEFAULT.stringBuilder()
+                .append("Request timeout to ").append(request.getUri().getHost())
+                .append(':').append(request.getUri().getExplicitPort())
+                .append(" after ").append(unpreciseMillisTime() - future.getStart())
+                .append(" ms, before the request was sent").toString();
     }
 
     private static void validateWebSocketRequest(Request request, AsyncHandler<?> asyncHandler) {

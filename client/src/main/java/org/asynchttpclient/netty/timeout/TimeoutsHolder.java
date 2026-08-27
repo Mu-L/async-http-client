@@ -49,6 +49,7 @@ public class TimeoutsHolder {
     private final NettyRequestSender requestSender;
     private final long requestTimeoutMillisTime;
     private final long requestTimeoutValue;
+    private final boolean absoluteDeadline;
     private final long readTimeoutValue;
     private final boolean useEventLoopTimeouts;
     private final @Nullable RequestTimeoutTimerTask requestTimeoutTask;
@@ -82,14 +83,18 @@ public class TimeoutsHolder {
         final long readTimeoutInMs = targetRequest.getReadTimeout().toMillis();
         readTimeoutValue = readTimeoutInMs == 0 ? config.getReadTimeout().toMillis() : readTimeoutInMs;
 
-        long requestTimeoutInMs = targetRequest.getRequestTimeout().toMillis();
-        if (requestTimeoutInMs == 0) {
-            requestTimeoutInMs = config.getRequestTimeout().toMillis();
-        }
+        long requestTimeoutInMs = requestTimeout(config, targetRequest);
 
         requestTimeoutValue = requestTimeoutInMs;
+        absoluteDeadline = nettyResponseFuture.isUseAbsoluteRequestDeadline();
         if (requestTimeoutInMs > -1) {
-            requestTimeoutMillisTime = unpreciseMillisTime() + requestTimeoutInMs;
+            // A redirect, a retry or an auth replay builds a new holder for the same future. Giving each of
+            // those hops the configured timeout lets a chain of n hops run for n times it; netting off what the
+            // exchange has already spent bounds it as a whole instead. Which one applies is the caller's
+            // choice, per request or per client. Left negative when the deadline is already behind us, which is
+            // what stops startReadTimeout arming a sibling for an exchange that is over.
+            requestTimeoutMillisTime = unpreciseMillisTime()
+                    + (absoluteDeadline ? remainingBudget(requestTimeoutInMs, nettyResponseFuture) : requestTimeoutInMs);
             requestTimeoutTask = new RequestTimeoutTimerTask(nettyResponseFuture, requestSender, this, requestTimeoutInMs);
         } else {
             requestTimeoutMillisTime = -1L;
@@ -115,10 +120,53 @@ public class TimeoutsHolder {
             return;
         }
         if (requestTimeoutTask != null) {
-            // The configured duration rather than the remaining time: this runs within microseconds of the
-            // constructor, and reading the clock again would only expose the deadline to a step between the two.
-            arm(requestTimeoutTask, requestTimeoutValue);
+            // Per attempt, the configured duration: this runs within microseconds of the constructor, so
+            // reading the clock again would only expose the deadline to a step between the two reads. An
+            // absolute deadline was anchored before this holder existed, so there the remainder is the budget,
+            // floored at zero: a task armed at zero still runs, and running is how the exchange gets failed.
+            arm(requestTimeoutTask, absoluteDeadline
+                    ? Math.max(remainingBudget(requestTimeoutValue, nettyResponseFuture), 0L) : requestTimeoutValue);
         }
+    }
+
+    /**
+     * How much of a deadline spanning the whole exchange is left, in milliseconds, negative once it has passed.
+     * {@link Long#MAX_VALUE} when the timeout is per attempt or disabled, neither of which bounds an exchange as
+     * a whole: an attempt is then given the configured timeout of its own however long the exchange has run.
+     * <p>
+     * Measured from the future's monotonic start rather than by comparing wall clocks across hops, so a clock
+     * correction landing mid-chain cannot move the deadline. Static, and asked of the future rather than of a
+     * holder, because a caller deciding whether a request is still worth sending has the future in hand before
+     * any holder exists for the attempt it is about to make.
+     *
+     * @see org.asynchttpclient.AsyncHttpClientConfig#isUseAbsoluteRequestDeadline()
+     */
+    public static long remainingBudget(AsyncHttpClientConfig config, NettyResponseFuture<?> nettyResponseFuture) {
+        if (!nettyResponseFuture.isUseAbsoluteRequestDeadline()) {
+            return Long.MAX_VALUE;
+        }
+        return remainingBudget(requestTimeout(config, nettyResponseFuture.getTargetRequest()), nettyResponseFuture);
+    }
+
+    private static long remainingBudget(long requestTimeoutInMs, NettyResponseFuture<?> nettyResponseFuture) {
+        if (requestTimeoutInMs <= -1) {
+            return Long.MAX_VALUE;
+        }
+        long spent = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - nettyResponseFuture.getStartNanos());
+        return requestTimeoutInMs - spent;
+    }
+
+    /**
+     * The request timeout in force for {@code request}: its own, or the client's when it does not carry one.
+     */
+    private static long requestTimeout(AsyncHttpClientConfig config, Request request) {
+        long requestTimeoutInMs = request.getRequestTimeout().toMillis();
+        return requestTimeoutInMs == 0 ? config.getRequestTimeout().toMillis() : requestTimeoutInMs;
+    }
+
+    // Visible for testing: the instant this holder's request timeout is due, as a wall-clock reading.
+    long requestTimeoutMillisTime() {
+        return requestTimeoutMillisTime;
     }
 
     /**
@@ -185,8 +233,8 @@ public class TimeoutsHolder {
     }
 
     private long remainingRequestTimeout() {
-        // A deadline already behind us is armed at zero rather than negative, so the task still runs and still
-        // cancels its read-timeout sibling, which is bookkeeping only it does.
+        // Floored at zero rather than passed on negative: a scheduler has no use for a negative delay, and the
+        // task has to run either way, since running is what fails the exchange.
         return Math.max(requestTimeoutMillisTime - unpreciseMillisTime(), 0L);
     }
 

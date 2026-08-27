@@ -139,7 +139,17 @@ public class Redirect30xInterceptor {
                         .setNameResolver(request.getNameResolver())
                         .setProxyServer(request.getProxyServer())
                         .setRealm(stripAuth ? null : request.getRealm())
-                        .setRequestTimeout(request.getRequestTimeout());
+                        .setRequestTimeout(request.getRequestTimeout())
+                        .setReadTimeout(request.getReadTimeout());
+
+                // The exchange holds the deadline flag on its future, so a hop that does not carry it forward
+                // leaves the request saying something the exchange is not doing, which is what a filter or a
+                // signature calculator reads. Set only when the request has one: the setter takes a primitive,
+                // and null is how a request defers to the client config.
+                Boolean useAbsoluteRequestDeadline = request.getUseAbsoluteRequestDeadline();
+                if (useAbsoluteRequestDeadline != null) {
+                    requestBuilder.setUseAbsoluteRequestDeadline(useAbsoluteRequestDeadline);
+                }
 
                 if (stripAuth) {
                     future.setRealm(null);
